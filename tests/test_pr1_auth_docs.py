@@ -33,7 +33,21 @@ def test_pair_is_bearer_free_but_identity_bound_and_health_is_optional_bearer():
         assert status == 401 and error["code"] == "auth.unpaired"
 
 
-def test_auth_errata_explicitly_flags_frozen_openapi_security_mismatch():
+def test_openapi_security_matches_runtime_pair_and_health_boundaries():
+    spec = json.loads((ROOT / "packages/bridge-protocol/openapi.v1.json").read_text())
+    assert spec["security"] == [{"ShortLivedBearer": []}]
+    assert spec["paths"]["/auth/pair"]["post"]["security"] == []
+    assert spec["paths"]["/health"]["get"]["security"] == [{}, {"ShortLivedBearer": []}]
+    for path, operations in spec["paths"].items():
+        if path in ("/auth/pair", "/health"):
+            continue
+        for method, operation in operations.items():
+            assert "security" not in operation, f"{method.upper()} {path} must inherit the global bearer"
+
+
+def test_auth_errata_records_openapi_security_correction():
     text = (ROOT / "docs/PROTOCOL_AUTH_ERRATA.md").read_text()
     assert "/auth/pair" in text and "/health" in text
-    assert "security: []" in text and "frozen" in text and "approval" in text
+    assert "security: []" in text and "security: [{}, {ShortLivedBearer: []}]" in text
+    assert "Status: corrected" in text and "PRRT_kwDOVkRils60PUhO" in text
+    assert "NOT applied" not in text and "REQUIRES-APPROVAL" not in text

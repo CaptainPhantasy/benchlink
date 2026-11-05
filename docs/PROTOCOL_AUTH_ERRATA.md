@@ -1,23 +1,27 @@
 # MVP authentication contract errata (PR1 review)
 
-The frozen `packages/bridge-protocol/openapi.v1.json` currently declares a global
-`ShortLivedBearer` requirement and omits operation-level exceptions. That is a
-real generated-client blocker, not a resolved thread. Its JSON bytes remain
-unchanged pending explicit contract-owner approval of this security-metadata correction.
-Do not change runtime behavior to require a bearer to obtain the first bearer.
+`packages/bridge-protocol/openapi.v1.json` declares a global `ShortLivedBearer`
+requirement. Before this correction, no operation overrode it, so the contract
+told generated clients that pairing needs the bearer it issues and that the
+health probe needs a bearer. Runtime never behaved that way.
 
-Actual behavior, covered by loopback HTTP regression:
-- `POST /v1/auth/pair` (`/auth/pair` in OpenAPI): no HTTP bearer required. Pairing still
-  requires an enrolled device, single-use signed challenge and (when enabled) the
-  exact trusted Tailscale identity. Proposed operation override: `security: []`.
-- `GET /v1/health` (`/health` in OpenAPI): no bearer required, returns `auth=unpaired`.
-  A valid bearer optionally produces `auth=paired`; an invalid/expired bearer does
-  not make the health probe fail. Proposed override: `security: [{}, {ShortLivedBearer: []}]`.
-- Session/task routes still require the global bearer and applicable exact scopes;
-  write body `access_token` must match the header. No runtime auth relaxation.
+**Status: corrected.** The wire-frozen 0.2.0-mvp contract received a narrow,
+approved freeze exception (Floyd GM, 2026-11-05, PR1 thread PRRT_kwDOVkRils60PUhO).
+Only security metadata changed. The OpenAPI document now matches the runtime
+behavior covered by loopback HTTP regression tests:
 
-The separate integration artifact `openapi-auth-correction.REQUIRES-APPROVAL.patch`
-adds only those two operation overrides. It is deliberately NOT applied to the
-frozen contract. Larry should obtain the narrow freeze exception, review generated
-client effects, then integrate it. Until then PR1 thread PRRT_kwDOVkRils60PUhO remains
-OPEN/BLOCKED; local passing tests do not resolve a contract mismatch or prove remote CI.
+- `POST /v1/auth/pair` (`/auth/pair` in OpenAPI): operation override `security: []`
+  (anonymous). No HTTP bearer is required. Pairing still requires an enrolled
+  device, a single-use signed challenge and (when enabled) the exact trusted
+  Tailscale identity.
+- `GET /v1/health` (`/health` in OpenAPI): operation override
+  `security: [{}, {ShortLivedBearer: []}]` (anonymous or optional bearer). No bearer
+  returns `auth=unpaired`. A valid bearer returns `auth=paired`. An invalid or
+  expired bearer does not make the health probe fail.
+- Session and task routes still inherit the global bearer and their exact scopes.
+  A write body `access_token` must match the header.
+
+No runtime behavior, message schema, path, version or wire shape changed. The
+packaged daemon ships only `schemas/*.schema.json`, so its distribution
+resources are unaffected. `tests/test_pr1_auth_docs.py` asserts both the runtime
+boundaries and the exact OpenAPI security overrides.

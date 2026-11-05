@@ -24,7 +24,13 @@
           "200": {
             "description": "health.pong JSON body"
           }
-        }
+        },
+        "security": [
+          {},
+          {
+            "ShortLivedBearer": []
+          }
+        ]
       }
     },
     "/auth/pair": {
@@ -35,7 +41,8 @@
           "200": {
             "description": "challenge or token"
           }
-        }
+        },
+        "security": []
       }
     },
     "/sessions": {
