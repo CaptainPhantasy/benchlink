@@ -1,0 +1,8 @@
+{
+  "v": "1",
+  "type": "error",
+  "code": "auth.denied",
+  "message": "unpaired device",
+  "retryable": false,
+  "correlation_id": "corr_demo_1"
+}
