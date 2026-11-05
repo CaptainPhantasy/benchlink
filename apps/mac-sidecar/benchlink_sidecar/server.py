@@ -14,6 +14,7 @@ Everything else -> 404 error envelope.
 from __future__ import annotations
 
 import json
+import threading
 import uuid
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
@@ -21,7 +22,7 @@ from . import CONTRACT_VERSION, __version__
 from .client import BridgeClient
 from .config import ConfigError, SidecarConfig, describe
 from .ui.copy import TASK_IN_FLIGHT_BODY, copy_tables_for_html, error_card
-from .ux import DEFAULT_TARGET, ROSTER, BridgeControlShell
+from .ux import DEFAULT_TARGET, ROSTER, BridgeControlShell, TaskInFlight
 
 
 def error_envelope(code: str, message: str, retryable: bool) -> dict:
@@ -36,8 +37,8 @@ HTML_SHELL = """<!DOCTYPE html>
  body{font:14px/1.4 system-ui,sans-serif;margin:24px;max-width:720px;background:#0f1115;color:#e8eaed}
  h1{font-size:18px;margin:0 0 8px} .muted{color:#9aa0a6}
  .card{border:1px solid #3c4043;border-radius:8px;padding:12px;margin:12px 0;background:#1a1d23}
- button{margin:4px 4px 4px 0;padding:6px 10px;cursor:pointer}
- textarea{width:100%;min-height:80px;background:#0f1115;color:#e8eaed;border:1px solid #3c4043;border-radius:6px;padding:8px}
+ label[for="goal"]{display:block;margin-top:8px} button{margin:4px 4px 4px 0;padding:6px 10px;cursor:pointer}
+ textarea{box-sizing:border-box;width:100%;min-height:80px;background:#0f1115;color:#e8eaed;border:1px solid #3c4043;border-radius:6px;padding:8px}
  .banner{background:#3a2a00;border:1px solid #f9ab00;padding:8px;border-radius:6px;margin:8px 0}
  .pill{display:inline-block;padding:2px 10px;border-radius:999px;font-weight:600;font-size:12px}
  .pill.neutral{background:#2c2e33;color:#b4b6bc}
@@ -48,45 +49,44 @@ HTML_SHELL = """<!DOCTYPE html>
  .result-summary{font-size:15px;margin:0 0 8px} .links a{color:#7fa0ff;display:block;margin:2px 0}
  .meta{color:#8e9198;font-size:12px;margin-top:8px}
  details{margin-top:8px;color:#8e9198;font-family:ui-monospace,monospace;font-size:12px}
- .opt{display:block;text-align:left;background:#1a1d23;color:#e8eaed;border:1px solid #3c4043;border-radius:6px;padding:8px 10px;margin:4px 0}
- .opt.selected{background:#1a2240;border-color:#7fa0ff}
- .opt:disabled{opacity:0.5;cursor:not-allowed}
- button:disabled{opacity:0.5;cursor:not-allowed}
-</style></head><body>
+.opt{display:block;background:#1a1d23;color:#e8eaed;border:1px solid #3c4043;border-radius:6px;text-align:left;padding:7px 10px}.opt.selected{border-color:#7fa0ff;background:#1a2240}.leads{display:flex;flex-wrap:wrap;gap:4px}.leads .opt{display:inline-block;font-size:12px}button:disabled{opacity:.5;cursor:not-allowed}</style></head><body>
 <h1>Benchlink · Bridge Control <span class="muted">[Beta]</span></h1>
-<p class="muted">Companion sidecar UI. Pick → Compose/Send → Wait.</p>
+<p class="muted">Send a task to Floyd's Labs staff.</p>
 <div id="banner" class="banner" style="display:none"></div>
 <div class="card" id="pick">
   <strong>1 · Pick target</strong>
-  <div id="roster" role="radiogroup" aria-label="Staff target"></div>
-  <p id="rosterLock" class="muted" style="display:none">End the current task to change target.</p>
+  <div id="roster" role="radiogroup" aria-label="Staff target"></div><p id="rosterLock" class="muted" hidden>End the current task to change target.</p>
 </div>
 <div class="card" id="compose">
-  <strong>2 · Compose + Send</strong><br/>
-  Target: <span id="targetLabel">Floyd · General Manager</span>
+  <strong id="composeHeading">Compose task for Floyd</strong><span id="targetLabel" hidden>Floyd</span>
   <label><input type="checkbox" id="hp"/> High priority (also ping Floyd in chat)</label>
-  <textarea id="goal" placeholder="Describe what you need."></textarea>
+  <label for="goal">Staff task</label><p id="goalHelp" class="muted">Describe what you need.</p>
+  <textarea id="goal" aria-describedby="goalHelp" placeholder="Describe what you need."></textarea>
   <p id="sendHint" class="muted"></p>
-  <button id="send" disabled>Send task</button>
-  <p id="inflightNotice" class="banner" style="display:none"></p>
+  <button id="send" aria-describedby="sendHint" disabled>Send task</button>
+  <div id="inflightNotice" class="banner" role="alert" style="display:none"><strong>Task in progress</strong><p>A task is in flight. End task first, then pick a target and send again.</p><button id="noticeEnd">End task</button></div>
 </div>
 <div class="card" id="wait">
-  <strong>3 · Status</strong>
-  <div><span id="statusPill" class="pill neutral">Idle</span></div>
+  <strong id="statusHeading" tabindex="-1">3 · Status</strong>
+  <div role="status" aria-live="polite" aria-atomic="true"><span id="statusPill" class="pill neutral">Idle</span></div>
   <div id="resultCard" style="display:none;margin-top:12px">
-    <p class="result-summary" id="resultSummary"></p>
+    <p class="result-summary" id="resultSummary" tabindex="-1"></p>
     <div class="links" id="resultLinks"></div>
     <p class="meta" id="resultMeta"></p>
+    <details id="resultDetails"><summary>Details</summary>
+      <div>Session ID: <code id="resultSession"></code><button id="copySession">Copy session ID</button></div>
+      <div>Task ID: <code id="resultTask"></code><button id="copyTask">Copy task ID</button></div>
+    </details>
   </div>
-  <div id="errorCard" style="display:none;margin-top:12px">
-    <p class="err-title" id="errTitle"></p>
+  <div role="alert" aria-atomic="true" id="errorCard" style="display:none;margin-top:12px">
+    <p class="err-title" id="errTitle" tabindex="-1"></p>
     <p class="err-body" id="errBody"></p>
     <button type="button" id="errPrimary" style="display:none"></button>
     <button type="button" id="errSecondary" style="display:none"></button>
     <details id="errDetails"><summary>Details</summary>
-      <div>code: <span id="errCode"></span></div>
-      <div>HTTP: <span id="errHttp"></span></div>
-      <div>correlation: <span id="errCorr"></span></div>
+      <div id="errCodeRow">Error code: <code id="errCode"></code></div>
+      <div id="errHttpRow">HTTP status: <code id="errHttp"></code></div>
+      <div id="errCorrRow">Correlation ID: <code id="errCorr"></code><button id="copyCorr">Copy correlation ID</button></div>
     </details>
   </div>
   <button id="end">End task</button>
@@ -95,149 +95,176 @@ HTML_SHELL = """<!DOCTYPE html>
 const roster = __ROSTER__;
 const offline = __OFFLINE__;
 const COPY = __COPY__;
-const banner = document.getElementById('banner');
-if (offline) { banner.style.display='block'; banner.textContent = 'Offline / fail-closed: ' + offline + '. Send uses dry-run payloads (no DNS invented).'; }
-const rost = document.getElementById('roster');
+const $ = id => document.getElementById(id);
+const banner = $('banner');
+if (offline) { banner.style.display='block'; banner.textContent = "Preview mode. The bridge address isn't set on this Mac."; }
+const rost = $('roster');
 let target = '__DEFAULT__';
-let inflight = false;
-function displayName(key) {
-  const e = roster.find(x => x.key === key);
-  return e ? e.display : key;
+let inflight = false, sending = false, lastSnapshot = {}, lastSent = null, viewKey = '';
+const HELP_URL = 'https://github.com/CaptainPhantasy/benchlink/blob/main/docs/PAIRING_PROOF_RUNBOOK.md';
+function displayName(key) { return (roster.find(x => x.key === key) || {}).display || key; }
+function selectTarget(key, focus=false) {
+  if (inflight || sending) return;
+  target=key; $('targetLabel').textContent=displayName(target);
+  $('composeHeading').textContent='Compose task for '+displayName(target).split('·')[0].trim();
+  renderRoster();
+  if (focus) rost.querySelector('[aria-checked="true"]').focus();
 }
 function renderRoster() {
-  rost.innerHTML = '';
-  roster.forEach(e => {
-    const b = document.createElement('button');
-    b.type = 'button';
-    b.className = 'opt' + (e.key === target ? ' selected' : '');
-    b.setAttribute('role', 'radio');
-    b.setAttribute('aria-checked', e.key === target ? 'true' : 'false');
-    b.disabled = inflight;
-    let label = e.display;
-    if (e.default) label += ' · Default';
-    if (e.group === 'canary') label += ' · Canary';
-    b.textContent = label;
-    b.onclick = () => {
-      if (inflight) return;
-      target = e.key;
-      document.getElementById('targetLabel').textContent = e.display;
-      renderRoster();
+  $('composeHeading').textContent='Compose task for '+displayName(target).split('·')[0].trim();
+  rost.innerHTML='';
+  const leadCaption=document.createElement('p'); leadCaption.className='muted'; leadCaption.textContent='Leads';
+  const leads=document.createElement('div'); leads.className='leads';
+  roster.forEach((e,i)=>{
+    const b=document.createElement('button'); b.type='button'; b.className='opt'+(e.key===target ? ' selected' : '');
+    b.setAttribute('role','radio'); b.setAttribute('aria-checked',e.key===target ? 'true' : 'false');
+    b.tabIndex=e.key===target ? 0 : -1; b.disabled=inflight || sending;
+    const check=document.createElement('span'); check.setAttribute('aria-hidden','true'); check.innerHTML=e.key===target ? '<svg class="lucide lucide-check" xmlns="http://www.w3.org/2000/svg" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true"><path d="m20 6-11 11-5-5"/></svg> ' : ''; b.appendChild(check);
+    b.appendChild(document.createTextNode(e.display+(e.default ? ' · Default' : e.group==='canary' ? ' · Canary' : '')));
+    b.onclick=()=>selectTarget(e.key,true);
+    b.onkeydown=event=>{
+      const delta={ArrowDown:1,ArrowRight:1,ArrowUp:-1,ArrowLeft:-1}[event.key];
+      let index;
+      if (delta) index=(i+delta+roster.length)%roster.length;
+      else if (event.key==='Home') index=0;
+      else if (event.key==='End') index=roster.length-1;
+      else return;
+      event.preventDefault(); selectTarget(roster[index].key,true);
     };
-    rost.appendChild(b);
+    if (e.group==='leads') leads.appendChild(b); else rost.appendChild(b);
   });
-  document.getElementById('rosterLock').style.display = inflight ? 'block' : 'none';
+  rost.appendChild(leadCaption); rost.appendChild(leads);
+  $('rosterLock').hidden=!inflight;
 }
 function updateSendEnabled() {
-  const goal = document.getElementById('goal').value.trim();
-  const btn = document.getElementById('send');
-  const hint = document.getElementById('sendHint');
-  if (inflight) {
-    btn.disabled = true;
-    hint.textContent = 'A task is in flight. End task first, then pick a target and send again.';
-  } else if (!goal) {
-    btn.disabled = true;
-    hint.textContent = '';
-  } else {
-    btn.disabled = false;
-    hint.textContent = '';
-  }
+  $('send').disabled=sending || inflight || !$('goal').value.trim();
+  $('sendHint').textContent=inflight ? 'A task is in flight. End task first, then pick a target and send again.' : '';
+  $('goal').readOnly=inflight; $('hp').disabled=inflight;
 }
-document.getElementById('goal').addEventListener('input', updateSendEnabled);
-document.getElementById('targetLabel').textContent = displayName(target);
-renderRoster();
-updateSendEnabled();
-
+function fallbackError(j) {
+  const t = COPY.errors[j.code] || COPY.errors.internal;
+  const name = displayName(target).split('·')[0].trim();
+  const id = $('deviceId') ? $('deviceId').textContent : '';
+  return {...t, title:t.title.replace('{Name}', name), body:t.body.replace('{Name}', name).replace('{id}', id || 'unknown'), details_code:j.code || 'internal', correlation_id:j.correlation_id};
+}
+async function copyText(button, value) {
+  const label = button.textContent;
+  try { await navigator.clipboard.writeText(value || ''); button.textContent='Copied'; }
+  catch (e) { button.textContent='Copy unavailable'; }
+  setTimeout(() => { button.textContent=label; }, 2000);
+}
+function safeDiagnostics() {
+  const e = (lastSnapshot.presentation || {}).error || {};
+  return JSON.stringify({status:lastSnapshot.wait_status, task_id:lastSnapshot.task_id, session_id:lastSnapshot.session_id,
+    code:e.details_code, correlation_id:e.correlation_id});
+}
+async function post(path, body) {
+  const r=await fetch(path, {method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify(body || {})});
+  return {r, j:await r.json()};
+}
+async function endTask(clear=true) {
+  const {r,j}=await post('/_sidecar/ux/end');
+  if (!r.ok) { showError(j); return false; }
+  $('inflightNotice').style.display='none'; show(j);
+  if (clear) { $('goal').value=''; $('hp').checked=false; }
+  updateSendEnabled(); $('goal').focus(); return true;
+}
+async function retryPoll() {
+  try { const {r,j}=await post('/_sidecar/ux/poll'); if (!r.ok) showError(j); else show(j); }
+  catch (e) { showError({code:'offline'}); }
+}
+async function resend(toFloyd=false) {
+  const saved = lastSent || {goal:$('goal').value, target, high_priority:$('hp').checked};
+  if (!await endTask(false)) return;
+  target=toFloyd ? 'floyd' : saved.target; $('targetLabel').textContent=displayName(target);
+  $('goal').value=saved.goal; $('hp').checked=saved.high_priority; renderRoster(); await sendTask();
+}
+const actions = {
+  'Retry': async () => {
+    if (((lastSnapshot.presentation || {}).error || {}).details_code === 'offline') {
+      try { const r=await fetch('/v1/health'); if (!r.ok) showError({code:'offline'}); else banner.style.display='none'; }
+      catch (e) { showError({code:'offline'}); }
+    } else await retryPoll();
+  },
+  'End task': () => endTask(), 'New task': () => endTask(),
+  'Edit task': () => { $('goal').readOnly=false; $('goal').focus(); },
+  'Send again': () => resend(), 'Send to Floyd': () => resend(true),
+  'Copy device ID': button => copyText(button, $('deviceId') ? $('deviceId').textContent : deviceId),
+  'Copy diagnostics': button => copyText(button, safeDiagnostics()),
+  'Details': () => { $('errDetails').open=true; $('errDetails').querySelector('summary').focus(); },
+  'Connection help': () => window.open(HELP_URL, '_blank', 'noopener')
+};
+let deviceId = '';
+fetch('/_sidecar/status').then(r=>r.json()).then(st=>{ deviceId=(st.pairing || {}).device_id || (st.config || {}).BENCHLINK_DEVICE_ID || ''; }).catch(()=>{});
+function wireAction(button, label) {
+  button.style.display = label && actions[label] ? 'inline-block' : 'none';
+  button.textContent = label || '';
+  button.onclick = actions[label] ? () => Promise.resolve(actions[label](button)).catch(()=>showError({code:'offline'})) : null;
+}
+function showError(j) { show({phase:'error', wait_status:'error', error:{code:j.code}, presentation:{status:COPY.status.error, error:(j.presentation || {}).error || fallbackError(j)}}); }
 function show(snap) {
-  const pres = snap.presentation || {};
-  const st = pres.status || COPY.status[snap.wait_status] || COPY.status.idle;
-  const pill = document.getElementById('statusPill');
-  pill.textContent = st.label;
-  pill.className = 'pill ' + (st.tone || 'neutral');
-  inflight = snap.phase === 'wait';
-  renderRoster();
-  updateSendEnabled();
-
-  const rc = document.getElementById('resultCard');
-  const ec = document.getElementById('errorCard');
-  rc.style.display = 'none';
-  ec.style.display = 'none';
-
-  if (pres.result && snap.wait_status === 'result') {
-    rc.style.display = 'block';
-    document.getElementById('resultSummary').textContent = pres.result.summary || '';
-    const links = document.getElementById('resultLinks');
-    links.innerHTML = '';
-    (pres.result.artifact_links || []).forEach(l => {
-      const a = document.createElement('a');
-      a.href = l.url; a.target = '_blank'; a.rel = 'noopener';
-      a.textContent = l.label || l.url; a.title = l.url;
+  lastSnapshot=snap;
+  const pres=snap.presentation || {}, st=pres.status || COPY.status[snap.wait_status] || COPY.status.idle;
+  const key=JSON.stringify([snap.phase,snap.wait_status,snap.task_id,pres.error]);
+  const changed=key!==viewKey; viewKey=key;
+  const pill=$('statusPill'); pill.textContent=st.label; pill.className='pill '+(st.tone || 'neutral');
+  inflight=snap.phase==='wait'; renderRoster(); updateSendEnabled();
+  const rc=$('resultCard'), ec=$('errorCard');
+  rc.style.display=pres.result && snap.wait_status==='result' ? 'block' : 'none';
+  ec.style.display=pres.error || snap.error ? 'block' : 'none';
+  if (pres.result && snap.wait_status==='result') {
+    $('resultSummary').textContent=pres.result.summary || '';
+    const links=$('resultLinks'); links.innerHTML='';
+    (pres.result.artifact_links || []).forEach(l=>{
+      if (!(l.url || '').startsWith('https://') && !(l.url || '').startsWith('http://')) return;
+      const a=document.createElement('a'); a.href=l.url; a.target='_blank'; a.rel='noopener';
+      const icon=document.createElement('span'); icon.setAttribute('aria-hidden','true'); icon.innerHTML='<svg class="lucide lucide-link-2" xmlns="http://www.w3.org/2000/svg" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="m9 15 6-6"/><path d="m11 7 1.5-1.5a5 5 0 0 1 7 7L18 14"/><path d="m13 17-1.5 1.5a5 5 0 0 1-7-7L6 10"/></svg> '; a.appendChild(icon); a.appendChild(document.createTextNode(l.label || l.url)); a.title=l.url; a.setAttribute('aria-label', l.url);
       links.appendChild(a);
     });
-    if (!pres.result.has_links) {
-      const note = document.createElement('p');
-      note.className = 'muted';
-      note.textContent = pres.result.empty_links_note || 'No links returned';
-      links.appendChild(note);
-    }
-    document.getElementById('resultMeta').textContent = pres.result.meta || '';
+    if (!pres.result.has_links) { const p=document.createElement('p'); p.className='muted'; p.textContent='No links returned'; links.appendChild(p); }
+    $('resultMeta').textContent=pres.result.meta || '';
+    $('resultSession').textContent=pres.result.session_id || snap.session_id || '';
+    $('resultTask').textContent=pres.result.task_id || snap.task_id || '';
+    if (changed) $('resultSummary').focus();
   }
-
-  if (pres.error || snap.error) {
-    const err = pres.error || {};
-    ec.style.display = 'block';
-    document.getElementById('errTitle').textContent = err.title || 'Something went wrong on the bridge';
-    document.getElementById('errBody').textContent = err.body || '';
-    document.getElementById('errCode').textContent = err.details_code || (snap.error && snap.error.code) || '';
-    document.getElementById('errHttp').textContent = (err.http != null ? err.http : '');
-    document.getElementById('errCorr').textContent = err.correlation_id || '';
-    const p = document.getElementById('errPrimary');
-    const sbtn = document.getElementById('errSecondary');
-    if (err.primary) { p.style.display = 'inline-block'; p.textContent = err.primary; } else { p.style.display = 'none'; }
-    if (err.secondary) { sbtn.style.display = 'inline-block'; sbtn.textContent = err.secondary; } else { sbtn.style.display = 'none'; }
+  if ((pres.error || snap.error) && changed) {
+    const err=pres.error || fallbackError(snap.error || {});
+    $('errTitle').textContent=err.title; $('errBody').textContent=err.body;
+    for (const [id,value] of [['errCode',err.details_code],['errHttp',err.http],['errCorr',err.correlation_id]]) {
+      $(id).textContent=value == null ? '' : value; $(id+'Row').hidden=value == null || value==='';
+    }
+    wireAction($('errPrimary'),err.primary); wireAction($('errSecondary'),err.secondary);
+    $('errTitle').focus();
   }
 }
-
-document.getElementById('send').onclick = async () => {
-  const goal = document.getElementById('goal').value.trim();
-  if (!goal || inflight) return;
-  const notice = document.getElementById('inflightNotice');
-  notice.style.display = 'none';
-  const r = await fetch('/_sidecar/ux/run', {method:'POST', headers:{'Content-Type':'application/json'},
-    body: JSON.stringify({target, goal, high_priority: document.getElementById('hp').checked})});
-  const j = await r.json();
-  if (r.status === 409) {
-    const msg = (j.presentation && j.presentation.error && j.presentation.error.body)
-      || j.message
-      || 'A task is in flight. End task first, then pick a target and send again.';
-    notice.style.display = 'block';
-    notice.textContent = 'Task in progress. ' + msg;
-    return;
-  }
-  if (!j.snapshot) {
-    const err = (j.presentation && j.presentation.error) || {
-      title: r.status === 422 ? 'Can\'t route to target' : 'Task couldn\'t be sent',
-      body: j.message || '', details_code: j.code || 'validation',
-      primary: 'Edit task', secondary: 'Details'
-    };
-    show({wait_status:'error', phase:'error', error:j, presentation:{status:COPY.status.error, error:err}});
-    return;
-  }
-  let snap = j.snapshot;
-  show(snap);
-  while (snap.phase === 'wait') {
-    await new Promise(res => setTimeout(res, 2000));
-    snap = await (await fetch('/_sidecar/ux/poll', {method:'POST'})).json();
-    show(snap);
-  }
-};
-document.getElementById('end').onclick = async () => {
-  const snap = await (await fetch('/_sidecar/ux/end', {method:'POST'})).json();
-  document.getElementById('inflightNotice').style.display = 'none';
-  show(snap);
-  document.getElementById('goal').value = '';
-  document.getElementById('hp').checked = false;
-  updateSendEnabled();
-};
+async function sendTask() {
+  const goal=$('goal').value.trim(); if (!goal || sending || inflight) return;
+  $('inflightNotice').style.display='none'; sending=true; updateSendEnabled(); $('send').textContent='Sending';
+  lastSent={target,goal,high_priority:$('hp').checked};
+  try {
+    const {r,j}=await post('/_sidecar/ux/run',lastSent);
+    sending=false; $('send').textContent='Send task';
+    if (r.status===409) { inflight=true; showInflight(); updateSendEnabled(); return; }
+    if (!r.ok || !j.snapshot) { showError(j); return; }
+    let snap=j.snapshot; show(snap); if (snap.phase==='wait') $('statusHeading').focus();
+    while (snap.phase==='wait') {
+      await new Promise(res=>setTimeout(res,2000));
+      if (!inflight) break;
+      const out=await post('/_sidecar/ux/poll'); if (!out.r.ok) { showError(out.j); break; }
+      snap=out.j; show(snap);
+    }
+  } catch (e) { showError({code:'offline'}); }
+  finally { sending=false; $('send').textContent='Send task'; updateSendEnabled(); }
+}
+function showInflight() { $('inflightNotice').style.display='block'; $('noticeEnd').focus(); }
+$('noticeEnd').onclick=()=>endTask().catch(()=>showError({code:'offline'}));
+$('send').onclick=sendTask;
+$('end').onclick=()=>endTask().catch(()=>showError({code:'offline'}));
+$('goal').addEventListener('input',updateSendEnabled);
+$('copySession').onclick=()=>copyText($('copySession'),$('resultSession').textContent);
+$('copyTask').onclick=()=>copyText($('copyTask'),$('resultTask').textContent);
+$('copyCorr').onclick=()=>copyText($('copyCorr'),$('errCorr').textContent);
+$('targetLabel').textContent=displayName(target); renderRoster(); updateSendEnabled();
 </script></body></html>
 """
 
@@ -246,6 +273,7 @@ def make_handler(cfg: SidecarConfig):
     client = BridgeClient(cfg)
     # One in-memory Bridge Control session per sidecar process (O4 session-only retention)
     live = {"shell": BridgeControlShell(cfg, client=client)}
+    run_lock = threading.Lock()
 
     class Handler(BaseHTTPRequestHandler):
         server_version = f"benchlink-mac-sidecar/{__version__}"
@@ -303,6 +331,10 @@ def make_handler(cfg: SidecarConfig):
         def do_POST(self):  # noqa: N802
             path = self.path.split("?", 1)[0]
             if path == "/_sidecar/ux/run":
+                if not run_lock.acquire(blocking=False):
+                    env = error_envelope("validation", TASK_IN_FLIGHT_BODY, False)
+                    env["presentation"] = {"error": error_card("task_in_flight")}
+                    return self._json(409, env)
                 try:
                     body = self._read_json()
                     shell = live["shell"]
@@ -316,8 +348,9 @@ def make_handler(cfg: SidecarConfig):
                         return self._json(409, env)
                     goal = str(body.get("goal") or "").strip()
                     if not goal:
-                        return self._json(400, error_envelope(
-                            "validation", "Compose a non-empty Staff task before Send", False))
+                        env = error_envelope("validation", "Compose a non-empty Staff task before Send", False)
+                        env["presentation"] = {"error": error_card("validation")}
+                        return self._json(422, env)
                     target_key = str(body.get("target") or DEFAULT_TARGET)
                     known = {e.key for e in ROSTER}
                     if target_key not in known:
@@ -338,23 +371,20 @@ def make_handler(cfg: SidecarConfig):
                         high_priority=bool(body.get("high_priority")),
                         max_ticks=int(body.get("max_ticks") or 2))
                     return self._json(200, out)
-                except ValueError as e:
-                    env = error_envelope(
-                        "routing" if "unknown roster" in str(e) else "validation",
-                        str(e), False)
-                    code = 422 if env["code"] == "routing" else 400
-                    return self._json(code, env)
-                except RuntimeError as e:
-                    if "in flight" in str(e) or "mid-task" in str(e) or "mid-wait" in str(e):
-                        env = error_envelope("validation", TASK_IN_FLIGHT_BODY, False)
-                        env["presentation"] = {
-                            "status": {"key": "error", "label": "Error", "tone": "danger"},
-                            "error": error_card("task_in_flight"),
-                        }
-                        return self._json(409, env)
-                    return self._json(400, error_envelope("validation", str(e), False))
-                except Exception as e:  # noqa: BLE001 — surface to UI
-                    return self._json(400, error_envelope("validation", str(e), False))
+                except TaskInFlight:
+                    env = error_envelope("validation", TASK_IN_FLIGHT_BODY, False)
+                    env["presentation"] = {"error": error_card("task_in_flight")}
+                    return self._json(409, env)
+                except ValueError:
+                    env = error_envelope("validation", "Task couldn't be sent", False)
+                    env["presentation"] = {"error": error_card("validation")}
+                    return self._json(422, env)
+                except Exception:  # Local presentation, not a wire-contract change.
+                    env = error_envelope("internal", "Something went wrong on the bridge", False)
+                    env["presentation"] = {"error": error_card("internal")}
+                    return self._json(500, env)
+                finally:
+                    run_lock.release()
             if path == "/_sidecar/ux/poll":
                 shell = live["shell"]
                 if shell.phase.value == "wait":
