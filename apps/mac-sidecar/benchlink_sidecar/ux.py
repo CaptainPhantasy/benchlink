@@ -113,6 +113,7 @@ class BridgeControlShell:
     high_priority: bool = False  # O3 default off
     session_id: str | None = None
     task_id: str | None = None
+    task_accepted: bool = False  # local lifecycle marker, never part of the wire contract
     wait_status: WaitStatus = WaitStatus.IDLE
     result: dict | None = None
     error: dict | None = None
@@ -171,6 +172,7 @@ class BridgeControlShell:
         self.high_priority = False  # O3 reset
         self.session_id = None
         self.task_id = None
+        self.task_accepted = False
         self.result = None
         self.error = None
         self.wait_status = WaitStatus.IDLE
@@ -240,6 +242,7 @@ class BridgeControlShell:
                 if st2 >= 400 or not isinstance(body2, dict) or body2.get("type") != "task.result":
                     return self._fail_send(st2, body2, payloads)
                 self.task_id = body2["task_id"]
+                self.task_accepted = True
             except AuthNotPaired as e:
                 return self._fail_send(401, {"code": "auth.unpaired", "message": str(e)}, payloads)
             except ConfigError as e:
@@ -367,6 +370,7 @@ class BridgeControlShell:
         self.transcript = SessionTranscript()  # O4: drop durable state
         self.session_id = None
         self.task_id = None
+        self.task_accepted = False
         self.goal = ""
         self.result = None
         self.error = None
@@ -374,6 +378,40 @@ class BridgeControlShell:
         self.phase = Phase.PICK
         self.last_session_req = None
         self.last_task_req = None
+
+    def can_resume_interrupted_wait(self) -> bool:
+        """Only a known accepted task interrupted by transport may resume."""
+        return bool(self.phase == Phase.ERROR and self.task_accepted
+                    and self.session_id and self.task_id
+                    and (self.error or {}).get("code") == "offline"
+                    and (self.result or {}).get("status") not in {"failed", "succeeded"})
+
+    def resume_interrupted_wait(self) -> None:
+        """GET the existing task. Never End, session.create or task.create here."""
+        if not self.can_resume_interrupted_wait():
+            return
+        self.phase = Phase.WAIT
+        self.wait_status = WaitStatus.RUNNING
+        self.error = None
+        self.wait_once()
+
+    def retry_terminal_error(self) -> None:
+        """Prepare a terminal draft or resume an accepted interrupted task.
+
+        Terminal failures return to Pick with the draft kept. Only a later
+        operator Send creates another task (O1); interrupted accepted tasks
+        only GET their existing task ID. Repeated retries in Pick are harmless.
+        """
+        if self.can_resume_interrupted_wait():
+            self.resume_interrupted_wait()
+            return
+        if self.phase == Phase.WAIT:
+            raise RuntimeError("A task is in flight. End task first.")
+        if self.phase != Phase.ERROR:
+            return
+        target, goal, high_priority = self.target_key, self.goal, self.high_priority
+        self.end_task()
+        self.target_key, self.goal, self.high_priority = target, goal, high_priority
 
     def snapshot(self) -> dict:
         entry = next((e for e in ROSTER if e.key == self.target_key), None)
@@ -398,6 +436,7 @@ class BridgeControlShell:
             "high_priority": self.high_priority,
             "session_id": self.session_id,
             "task_id": self.task_id,
+            "task_accepted": self.task_accepted,
             "wait_status": self.wait_status.value,
             "dry_run_mode": self.dry_run_mode,
             "offline_banner": self.offline_banner,

@@ -126,6 +126,7 @@ const banner = $('banner');
 
 const rost = $('roster');
 let target = '__DEFAULT__';
+let recovering = false, polling = false, pollRequest = false, acceptedSnapshot = null;
 let inflight = false, sending = false, lastSnapshot = {}, lastSent = null, viewKey = '';
 const HELP_URL = 'https://github.com/CaptainPhantasy/benchlink/blob/main/docs/PAIRING_PROOF_RUNBOOK.md';
 function displayName(key) { return (roster.find(x => x.key === key) || {}).display || key; }
@@ -165,6 +166,8 @@ function renderRoster() {
 function updateSendEnabled() {
   const btn=$('send'); let hint='';
   if (previewMode) hint="Preview mode. The bridge address isn't set on this Mac, so tasks can't be sent.";
+  else if (recovering) hint='Recovering task';
+  else if (isInterruptedTask()) hint='Reconnect to resume the current task.';
   else if (sending) hint='Sending';
   else if (inflight) hint='A task is in flight. End task first, then pick a target and send again.';
   else if (connectionKey==='disconnected' || connectionKey==='connecting') hint='Reconnect to send.';
@@ -204,9 +207,63 @@ async function endTask(clear=true) {
   if (clear) { $('goal').value=''; $('hp').checked=false; }
   updateSendEnabled(); $('goal').focus(); return true;
 }
+async function pollUntilSettled(snap) {
+  if (polling) return;
+  polling=true;
+  try {
+    while (snap.phase==='wait') {
+      await new Promise(res=>setTimeout(res,2000));
+      if (!inflight) break;
+      const out=await post('/_sidecar/ux/poll');
+      if (!out.r.ok) { showError(out.j); break; }
+      snap=out.j; show(snap);
+    }
+  } catch (e) { showError({code:'offline'}); }
+  finally { polling=false; updateSendEnabled(); }
+}
 async function retryPoll() {
-  try { const {r,j}=await post('/_sidecar/ux/poll'); if (!r.ok) showError(j); else show(j); }
-  catch (e) { showError({code:'offline'}); }
+  if (polling || pollRequest) return;
+  pollRequest=true;
+  try {
+    const {r,j}=await post('/_sidecar/ux/poll');
+    if (!r.ok) showError(j);
+    else { show(j); await pollUntilSettled(j); }
+  } catch (e) { showError({code:'offline'}); }
+  finally { pollRequest=false; updateSendEnabled(); }
+}
+async function retryConnectionTask() {
+  if (recovering || sending || polling) return;
+  recovering=true; updateSendEnabled();
+  let resetTerminal=false;
+  try {
+    await refreshStatus();
+    if (connectionKey!=='connected') return;
+    if (isInterruptedTask()) await retryPoll();
+    else resetTerminal=lastSnapshot.phase==='error';
+  } finally { recovering=false; updateSendEnabled(); }
+  if (resetTerminal) return retryTerminal();
+}
+async function retryTerminal() {
+  if (recovering || sending || inflight) return;
+  recovering=true; updateSendEnabled();
+  try {
+    const {r,j}=await post('/_sidecar/ux/retry');
+    if (!r.ok) {
+      showError(j);
+      if (r.status===409) { inflight=true; renderRoster(); updateSendEnabled(); }
+      return;
+    }
+    // The server keeps the draft and never dispatches here. Send remains explicit.
+    target=j.target || target; $('targetLabel').textContent=displayName(target);
+    $('goal').value=j.goal || ''; $('hp').checked=!!j.high_priority;
+    show(j); renderRoster();
+  } catch (e) { showError({code:'offline'}); }
+  finally { recovering=false; updateSendEnabled(); }
+}
+async function retryTask() {
+  if (recovering || sending || inflight) return;
+  if (lastSnapshot.phase==='error') return retryTerminal();
+  return retryPoll();
 }
 async function resend(toFloyd=false) {
   const saved = lastSent || {goal:$('goal').value, target, high_priority:$('hp').checked};
@@ -219,7 +276,7 @@ const actions = {
     if (((lastSnapshot.presentation || {}).error || {}).details_code === 'offline') {
       try { const r=await fetch('/v1/health'); if (!r.ok) showError({code:'offline'}); else banner.style.display='none'; }
       catch (e) { showError({code:'offline'}); }
-    } else await retryPoll();
+    } else await retryTask();
   },
   'End task': () => endTask(), 'New task': () => endTask(),
   'Edit task': () => { $('goal').readOnly=false; $('goal').focus(); },
@@ -235,8 +292,20 @@ function wireAction(button, label) {
   button.textContent = label || '';
   button.onclick = actions[label] ? () => Promise.resolve(actions[label](button)).catch(()=>showError({code:'offline'})) : null;
 }
-function showError(j) { show({phase:'error', wait_status:'error', error:{code:j.code}, presentation:{status:COPY.status.error, error:(j.presentation || {}).error || fallbackError(j)}}); }
+function isInterruptedTask() {
+  return !!(acceptedSnapshot && lastSnapshot.phase==='error' &&
+    (lastSnapshot.error || {}).code==='offline' &&
+    !['failed','succeeded'].includes((lastSnapshot.result || {}).status));
+}
+function showError(j) {
+  const keep=j.code==='offline' && acceptedSnapshot ? acceptedSnapshot : {};
+  show({...keep, phase:'error', wait_status:'error', error:{code:j.code},
+    presentation:{status:COPY.status.error, error:(j.presentation || {}).error || fallbackError(j)}});
+}
 function show(snap) {
+  // Retain accepted IDs across a failed local fetch as well as a daemon outage.
+  if (snap.task_id && snap.session_id && (snap.task_accepted || snap.phase==='wait')) acceptedSnapshot={...snap};
+  if (snap.phase==='pick' || snap.phase==='done' || (snap.result || {}).status==='failed') acceptedSnapshot=null;
   lastSnapshot=snap;
   const pres=snap.presentation || {}, st=pres.status || COPY.status[snap.wait_status] || COPY.status.idle;
   const key=JSON.stringify([snap.phase,snap.wait_status,snap.task_id,pres.error]);
@@ -272,7 +341,7 @@ function show(snap) {
   }
 }
 async function sendTask() {
-  const goal=$('goal').value.trim(); if (!goal || sending || inflight || previewMode || pairingBusy || connectionKey!=='connected') return;
+  const goal=$('goal').value.trim(); if (!goal || isInterruptedTask() || recovering || sending || inflight || previewMode || pairingBusy || connectionKey!=='connected') return;
   if (pairingState==='expired' && !autoRepairAttempted) { if (!await pairDevice(true,true)) return; }
   if (pairingState!=='paired') return;
   $('inflightNotice').style.display='none'; sending=true; updateSendEnabled(); $('send').textContent='Sending';
@@ -283,12 +352,7 @@ async function sendTask() {
     if (r.status===409) { inflight=true; showInflight(); updateSendEnabled(); return; }
     if (!r.ok || !j.snapshot) { showError(j); return; }
     let snap=j.snapshot; show(snap); if (snap.phase==='wait') $('statusHeading').focus();
-    while (snap.phase==='wait') {
-      await new Promise(res=>setTimeout(res,2000));
-      if (!inflight) break;
-      const out=await post('/_sidecar/ux/poll'); if (!out.r.ok) { showError(out.j); break; }
-      snap=out.j; show(snap);
-    }
+    await pollUntilSettled(snap);
   } catch (e) { showError({code:'offline'}); }
   finally { sending=false; $('send').textContent='Send task'; updateSendEnabled(); }
 }
@@ -312,7 +376,7 @@ function showBanner(err) {
   const body=document.createElement('p'); body.textContent=err.body;
   banner.appendChild(title); banner.appendChild(body);
   if (connectionKey==='disconnected') {
-    const retry=document.createElement('button'); retry.textContent='Retry'; retry.onclick=()=>refreshStatus(); banner.appendChild(retry);
+    const retry=document.createElement('button'); retry.textContent='Retry'; retry.onclick=retryConnectionTask; banner.appendChild(retry);
   }
   banner.style.display='block'; title.tabIndex=-1; title.focus();
 }
@@ -362,6 +426,7 @@ async function refreshStatus(allowAutoRepair=true) {
     else if (card) showBanner(card);
     else banner.style.display='none';
     renderPairingBusy(); updateSendEnabled();
+    if (connectionKey==='connected' && isInterruptedTask() && !recovering && !sending && !polling) await retryPoll();
     if (allowAutoRepair && pairingState==='expired' && !autoRepairAttempted && !pairingBusy && connectionKey==='connected') {
       await pairDevice(true,true);
     }
@@ -402,10 +467,10 @@ async function pairDevice(repair=false, automatic=false) {
 actions['Pair this Mac']=()=>pairDevice(false);
 actions['Re-pair']=()=>pairDevice(true);
 actions['Open connection']=openConnection;
-actions['Retry']=()=>((lastSnapshot.presentation || {}).error || {}).details_code==='offline' ? refreshStatus() : retryPoll();
+actions['Retry']=()=>((lastSnapshot.presentation || {}).error || {}).details_code==='offline' ? retryConnectionTask() : retryTask();
 $('connPill').onclick=openConnection;
 $('s4Close').onclick=()=>{ $('s4').style.display='none'; $('connPill').focus(); };
-$('s4Retry').onclick=()=>refreshStatus(); $('s4Repair').onclick=()=>pairDevice(true);
+$('s4Retry').onclick=retryConnectionTask; $('s4Repair').onclick=()=>pairDevice(true);
 $('pairBtn').onclick=()=>pairDevice(pairingState!=='not_paired');
 $('copyDevice').onclick=()=>copyText($('copyDevice'),$('deviceId').textContent);
 $('copyDiagnostics').onclick=()=>copyText($('copyDiagnostics'),JSON.stringify(lastStatus));
@@ -532,7 +597,7 @@ def make_handler(cfg: SidecarConfig):
                         }
                         return self._json(503, env)
                     # Ruling 1 / O1: refuse Send while Queued or Running; never silent restart.
-                    if shell.phase.value == "wait":
+                    if shell.phase.value == "wait" or shell.can_resume_interrupted_wait():
                         env = error_envelope("validation", TASK_IN_FLIGHT_BODY, False)
                         env["presentation"] = {
                             "status": {"key": "error", "label": "Error", "tone": "danger"},
@@ -579,11 +644,35 @@ def make_handler(cfg: SidecarConfig):
                     return self._json(500, env)
                 finally:
                     run_lock.release()
+            if path == "/_sidecar/ux/retry":
+                if not run_lock.acquire(blocking=False):
+                    env = error_envelope("validation", "Task in progress", False)
+                    env["presentation"] = {"error": error_card("task_in_flight")}
+                    return self._json(409, env)
+                try:
+                    shell = live["shell"]
+                    if shell.phase.value == "wait":
+                        env = error_envelope("validation", "Task in progress", False)
+                        env["presentation"] = {"error": error_card("task_in_flight")}
+                        return self._json(409, env)
+                    shell.retry_terminal_error()
+                    return self._json(200, shell.snapshot())
+                finally:
+                    run_lock.release()
             if path == "/_sidecar/ux/poll":
-                shell = live["shell"]
-                if shell.phase.value == "wait":
-                    shell.wait_once()
-                return self._json(200, shell.snapshot())
+                if not run_lock.acquire(blocking=False):
+                    env = error_envelope("validation", TASK_IN_FLIGHT_BODY, False)
+                    env["presentation"] = {"error": error_card("task_in_flight")}
+                    return self._json(409, env)
+                try:
+                    shell = live["shell"]
+                    if shell.can_resume_interrupted_wait():
+                        shell.resume_interrupted_wait()
+                    elif shell.phase.value == "wait":
+                        shell.wait_once()
+                    return self._json(200, shell.snapshot())
+                finally:
+                    run_lock.release()
             if path == "/_sidecar/ux/end":
                 live["shell"].end_task()
                 return self._json(200, live["shell"].snapshot())
