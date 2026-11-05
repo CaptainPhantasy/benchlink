@@ -12,4 +12,4 @@ smoke = ["jsonschema>=4.18"]  # schema-validates dry-run bodies in smoke; skippe
 benchlink-sidecar = "benchlink_sidecar.__main__:main"
 
 [tool.setuptools]
-packages = ["benchlink_sidecar"]
+packages = ["benchlink_sidecar", "benchlink_sidecar.ui"]

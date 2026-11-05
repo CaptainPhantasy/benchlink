@@ -5,3 +5,7 @@ packaging==26.3
 pluggy==1.7.0
 Pygments==2.21.0
 pytest==9.2.0
+
+# Isolated installed-distribution regression build tools (not runtime deps).
+setuptools==84.2.1
+wheel==0.48.0
