@@ -520,8 +520,8 @@ def make_handler(cfg: SidecarConfig):
     class Handler(BaseHTTPRequestHandler):
         server_version = f"benchlink-mac-sidecar/{__version__}"
 
-        def _json(self, status: int, payload: dict):
-            body = json.dumps(payload).encode()
+        def _json(self, status: int, payload: dict | bytes):
+            body = payload if isinstance(payload, bytes) else json.dumps(payload).encode()
             self.send_response(status)
             self.send_header("Content-Type", "application/json")
             self.send_header("Content-Length", str(len(body)))
@@ -591,15 +591,9 @@ def make_handler(cfg: SidecarConfig):
                 return self._json(200, BridgeControlShell(cfg).snapshot())
             return self._json(404, error_envelope("validation", f"no route {path}", False))
 
-        def do_POST(self):  # noqa: N802
-            if not self._allow_request(mutation=True):
-                return
-            path = self.path.split("?", 1)[0]
+        def _task_response(self, path: str):
+            """Compute task state/reply while the caller owns the operation lock."""
             if path == "/_sidecar/ux/run":
-                if not run_lock.acquire(blocking=False):
-                    env = error_envelope("validation", TASK_IN_FLIGHT_BODY, False)
-                    env["presentation"] = {"error": error_card("task_in_flight")}
-                    return self._json(409, env)
                 try:
                     body = self._read_json()
                     shell = live["shell"]
@@ -613,7 +607,7 @@ def make_handler(cfg: SidecarConfig):
                             "status": {"key": "error", "label": "Error", "tone": "danger"},
                             "error": error_card("offline", preview=True),
                         }
-                        return self._json(503, env)
+                        return (503, env)
                     # Ruling 1 / O1: refuse Send while Queued or Running; never silent restart.
                     if shell.phase.value == "wait" or shell.can_resume_interrupted_wait():
                         env = error_envelope("validation", TASK_IN_FLIGHT_BODY, False)
@@ -621,12 +615,12 @@ def make_handler(cfg: SidecarConfig):
                             "status": {"key": "error", "label": "Error", "tone": "danger"},
                             "error": error_card("task_in_flight"),
                         }
-                        return self._json(409, env)
+                        return (409, env)
                     goal = str(body.get("goal") or "").strip()
                     if not goal:
                         env = error_envelope("validation", "Compose a non-empty Staff task before Send", False)
                         env["presentation"] = {"error": error_card("validation")}
-                        return self._json(422, env)
+                        return (422, env)
                     target_key = str(body.get("target") or DEFAULT_TARGET)
                     known = {e.key for e in ROSTER}
                     if target_key not in known:
@@ -638,7 +632,7 @@ def make_handler(cfg: SidecarConfig):
                             "status": {"key": "error", "label": "Error", "tone": "danger"},
                             "error": error_card("routing", target_name=target_key),
                         }
-                        return self._json(422, env)
+                        return (422, env)
                     if shell.phase.value in {"done", "error"}:
                         shell.end_task()
                     out = shell.start_and_wait(
@@ -646,51 +640,54 @@ def make_handler(cfg: SidecarConfig):
                         target_key=target_key,
                         high_priority=bool(body.get("high_priority")),
                         max_ticks=int(body.get("max_ticks") or 2))
-                    return self._json(200, {"snapshot": out["snapshot"],
+                    return (200, {"snapshot": out["snapshot"],
                                             "send": {"mode": out.get("send", {}).get("mode")}})
                 except TaskInFlight:
                     env = error_envelope("validation", TASK_IN_FLIGHT_BODY, False)
                     env["presentation"] = {"error": error_card("task_in_flight")}
-                    return self._json(409, env)
+                    return (409, env)
                 except ValueError:
                     env = error_envelope("validation", "Task couldn't be sent", False)
                     env["presentation"] = {"error": error_card("validation")}
-                    return self._json(422, env)
+                    return (422, env)
                 except Exception:  # Local presentation, not a wire-contract change.
                     env = error_envelope("internal", "Something went wrong on the bridge", False)
                     env["presentation"] = {"error": error_card("internal")}
-                    return self._json(500, env)
-                finally:
-                    run_lock.release()
+                    return (500, env)
             if path == "/_sidecar/ux/retry":
-                if not run_lock.acquire(blocking=False):
+                shell = live["shell"]
+                if shell.phase.value == "wait":
                     env = error_envelope("validation", "Task in progress", False)
                     env["presentation"] = {"error": error_card("task_in_flight")}
-                    return self._json(409, env)
-                try:
-                    shell = live["shell"]
-                    if shell.phase.value == "wait":
-                        env = error_envelope("validation", "Task in progress", False)
-                        env["presentation"] = {"error": error_card("task_in_flight")}
-                        return self._json(409, env)
-                    shell.retry_terminal_error()
-                    return self._json(200, shell.snapshot())
-                finally:
-                    run_lock.release()
+                    return (409, env)
+                shell.retry_terminal_error()
+                return (200, shell.snapshot())
             if path == "/_sidecar/ux/poll":
+                shell = live["shell"]
+                if shell.can_resume_interrupted_wait():
+                    shell.resume_interrupted_wait()
+                elif shell.phase.value == "wait":
+                    shell.wait_once()
+                return (200, shell.snapshot())
+
+        def do_POST(self):  # noqa: N802
+            if not self._allow_request(mutation=True):
+                return
+            path = self.path.split("?", 1)[0]
+            if path in {"/_sidecar/ux/run", "/_sidecar/ux/retry", "/_sidecar/ux/poll"}:
                 if not run_lock.acquire(blocking=False):
-                    env = error_envelope("validation", TASK_IN_FLIGHT_BODY, False)
+                    message = "Task in progress" if path.endswith("/retry") else TASK_IN_FLIGHT_BODY
+                    env = error_envelope("validation", message, False)
                     env["presentation"] = {"error": error_card("task_in_flight")}
                     return self._json(409, env)
                 try:
-                    shell = live["shell"]
-                    if shell.can_resume_interrupted_wait():
-                        shell.resume_interrupted_wait()
-                    elif shell.phase.value == "wait":
-                        shell.wait_once()
-                    return self._json(200, shell.snapshot())
+                    status, payload = self._task_response(path)
+                    # Freeze the reply while state is protected. Transport is not
+                    # task work: a received reply must permit the next operation.
+                    body = json.dumps(payload).encode()
                 finally:
                     run_lock.release()
+                return self._json(status, body)
             if path == "/_sidecar/ux/end":
                 live["shell"].end_task()
                 return self._json(200, live["shell"].snapshot())
