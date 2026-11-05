@@ -14,6 +14,7 @@ Everything else -> 404 error envelope.
 from __future__ import annotations
 
 import json
+import socket
 import threading
 import uuid
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -267,5 +268,16 @@ def make_handler(cfg: SidecarConfig):
     return Handler
 
 
+class _IPv6ThreadingHTTPServer(ThreadingHTTPServer):
+    address_family = socket.AF_INET6
+
+
 def serve(cfg: SidecarConfig) -> ThreadingHTTPServer:
-    return ThreadingHTTPServer((cfg.listen_host, cfg.listen_port), make_handler(cfg))
+    # config accepts only 127.0.0.1, localhost and ::1; ::1 needs an AF_INET6 socket.
+    cls = _IPv6ThreadingHTTPServer if ":" in cfg.listen_host else ThreadingHTTPServer
+    return cls((cfg.listen_host, cfg.listen_port), make_handler(cfg))
+
+
+def listen_url(host: str, port: int) -> str:
+    """Browser URL for a listen address; IPv6 literals need brackets."""
+    return f"http://[{host}]:{port}" if ":" in host else f"http://{host}:{port}"
