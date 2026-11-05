@@ -25,6 +25,10 @@ from .http_transport import open_no_redirects
 from .results import ResultSource, post_callback
 
 
+# 5xx replies that say the request itself was not handled (method or HTTP version).
+DEFINITIVE_5XX = frozenset({501, 505})
+
+
 def now_iso() -> str:
     return datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
 
@@ -64,6 +68,8 @@ class WebhookTransport(Transport):
         req = urllib.request.Request(ep.webhook_url, data=json.dumps(payload).encode(),
                                      method="POST", headers=headers)
         t0 = time.monotonic()
+        # urllib wraps connect/send failures in URLError; anything else after that point
+        # happened once the receiver had the whole request, so it may already be working.
         try:
             with open_no_redirects(req, timeout=self.cfg.webhook_timeout_s) as r:
                 status = r.status
@@ -73,20 +79,25 @@ class WebhookTransport(Transport):
                                   f"sender key (HTTP {e.code})") from None
             if e.code == 404:
                 raise BridgeError("routing", f"routine webhook for {target_key!r} not found (HTTP 404)") from None
+            # A proxy or handler can answer 408/5xx after the routine already received
+            # the task, so those replies do not prove it was not accepted.
             if e.code in (408, 504):
-                raise BridgeError("timeout", f"routine webhook for {target_key!r} timed out (HTTP {e.code})") from None
+                raise BridgeError("timeout", f"routine webhook for {target_key!r} timed out (HTTP {e.code})",
+                                  delivery_uncertain=True) from None
+            uncertain = e.code >= 500 and e.code not in DEFINITIVE_5XX
             raise BridgeError("offline", f"routine webhook for {target_key!r} HTTP {e.code}",
-                              retryable=e.code >= 500) from None
-        except (TimeoutError, socket.timeout):
-            raise BridgeError("timeout", f"routine webhook for {target_key!r} exceeded "
-                              f"{self.cfg.webhook_timeout_s}s") from None
+                              retryable=e.code >= 500, delivery_uncertain=uncertain) from None
         except urllib.error.URLError as e:
             if isinstance(e.reason, (TimeoutError, socket.timeout)):
                 raise BridgeError("timeout", f"routine webhook for {target_key!r} exceeded "
                                   f"{self.cfg.webhook_timeout_s}s") from None
             raise BridgeError("offline", f"routine webhook for {target_key!r} unreachable: {e.reason}") from None
+        except (TimeoutError, socket.timeout):
+            raise BridgeError("timeout", f"routine webhook for {target_key!r} exceeded "
+                              f"{self.cfg.webhook_timeout_s}s after delivery", delivery_uncertain=True) from None
         except OSError as e:
-            raise BridgeError("offline", f"routine webhook for {target_key!r} unreachable: {e}") from None
+            raise BridgeError("offline", f"routine webhook for {target_key!r} dropped the connection "
+                              f"after delivery: {e}", delivery_uncertain=True) from None
         return {"transport": self.name, "http_status": status,
                 "elapsed_ms": int((time.monotonic() - t0) * 1000)}
 

@@ -384,6 +384,11 @@ class HttpCallbackResultSource(ResultSource):
             if payload.get("status") in {"succeeded", "failed"}:
                 self._tokens.pop(task_id, None)  # single use for final results
 
+    def revoke(self, task_id: str) -> None:
+        """Drop a task's callback token once no result can legitimately arrive."""
+        with self._lock:
+            self._tokens.pop(task_id, None)
+
     def expire_token_for_test(self, task_id):
         with self._lock:
             tok, _ = self._tokens[task_id]

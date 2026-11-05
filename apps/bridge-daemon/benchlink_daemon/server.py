@@ -9,6 +9,7 @@ Contract paths (packages/bridge-protocol/openapi.v1.json, frozen):
   GET  /v1/sessions/{id}/events        -> 200 session.event[] (staff results)
   POST /v1/sessions/{id}/close         session.close   -> 200 {} (contract has no response schema)
   POST /v1/tasks                       task.create     -> 202 task.result(status=accepted) after dispatch
+                                       (uncertain delivery -> error, task stays accepted until result/deadline)
   GET  /v1/tasks/{task_id}             -> 200 task.result (polls ResultSource; timeout -> failed/timeout)
 Non-contract:
   POST /_bridge/results/{task_id}      http_callback ResultSource only (per-task short-lived token)
@@ -23,6 +24,7 @@ from __future__ import annotations
 import json
 import logging
 import re
+import socket
 import threading
 import time
 import uuid
@@ -434,7 +436,19 @@ def make_handler(state: BridgeState):
                 receipt = state.adapter.dispatch(body, key, self.rid)
             except BridgeError as e:
                 with state.lock:
-                    state._finish(t, "failed", e.message, e.code)
+                    if e.delivery_uncertain:
+                        # The bot may already be working. Stay non-terminal so GET keeps
+                        # checking for its result until the task deadline (no redispatch).
+                        # A result that already landed (fast callback) is left untouched.
+                        if t["status"] == "accepted":
+                            t["summary"] = f"dispatch to {key} unconfirmed ({e.code}); waiting for its result"
+                            t["updated_mono"] = time.monotonic()
+                    elif t["status"] not in FINAL:
+                        state._finish(t, "failed", e.message, e.code)
+                        if isinstance(state.adapter.source, HttpCallbackResultSource):
+                            state.adapter.source.revoke(tid)  # the bot never got this callback token
+                log.warning("dispatch rid=%s task_id=%s target=%s code=%s uncertain=%s",
+                            self.rid, tid, key, e.code, e.delivery_uncertain)
                 raise
             log.info("dispatch rid=%s task_id=%s session_id=%s target=%s receipt=%s",
                      self.rid, tid, sid, key, receipt)
@@ -470,12 +484,22 @@ def make_handler(state: BridgeState):
     return Handler
 
 
+class _IPv6ThreadingHTTPServer(ThreadingHTTPServer):
+    address_family = socket.AF_INET6
+
+
+def listen_url(host: str, port: int) -> str:
+    """HTTP base URL for a listen address; IPv6 literals need brackets."""
+    return f"http://[{host}]:{port}" if ":" in host else f"http://{host}:{port}"
+
+
 def serve(cfg: DaemonConfig, state: BridgeState | None = None, **state_kwargs) -> ThreadingHTTPServer:
     state = state or BridgeState(cfg, **state_kwargs)
-    srv = ThreadingHTTPServer((cfg.listen_host, cfg.listen_port), make_handler(state))
+    cls = _IPv6ThreadingHTTPServer if ":" in cfg.listen_host else ThreadingHTTPServer
+    srv = cls((cfg.listen_host, cfg.listen_port), make_handler(state))
     src = state.adapter.source
     if isinstance(src, HttpCallbackResultSource) and not src.base_url:
         host, port = srv.server_address[:2]
-        src.base_url = f"http://{host}:{port}"
+        src.base_url = listen_url(host, port)
     srv.state = state  # type: ignore[attr-defined]
     return srv
