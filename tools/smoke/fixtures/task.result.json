@@ -1,0 +1,17 @@
+{
+  "v": "1",
+  "type": "task.result",
+  "session_id": "sess_demo_1",
+  "task_id": "task_demo_1",
+  "status": "succeeded",
+  "summary": "Canary ack",
+  "artifact_links": [
+    {
+      "title": "STAFF_COLLAB",
+      "url": "https://drive.google.com/file/d/1vvR8ZscZRsOtwVHB7CYaO1boujQVkDSJ/view"
+    }
+  ],
+  "error_class": null,
+  "agent_id": "bd8bb2b0-1df6-42f9-92ee-634c17736ccd",
+  "created_at": "2026-11-05T15:25:00-05:00"
+}
