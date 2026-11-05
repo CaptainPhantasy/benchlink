@@ -14,6 +14,7 @@ import threading
 import urllib.error
 import urllib.request
 from pathlib import Path
+from urllib.parse import urlencode
 
 HERE = Path(__file__).resolve().parent
 ROOT = HERE.parents[1]
@@ -48,6 +49,12 @@ def schema_validator():
         s = json.loads((SCHEMAS / schema_file).read_text())
         return [e.message for e in Draft202012Validator(s, registry=reg).iter_errors(data)]
     return validate
+
+
+def query_token_fixture_url(base: str) -> str:
+    """A visibly synthetic runtime sentinel, never a bearer or stored credential."""
+    fake_query_token = "fixture-not-a-real-token-" + str(os.getpid())
+    return base + "/v1/tasks/task_x?" + urlencode({"access_token": fake_query_token})
 
 
 def http_json(method, url, body=None):
@@ -115,7 +122,7 @@ def main() -> int:
     check(st == 401 and err.get("code") == "auth.unpaired", f"POST /v1/tasks without bearer -> {st}")
     st, err = http_json("GET", f"{base}/v1/tasks/task_x")
     check(st == 401 and err.get("code") == "auth.unpaired", f"GET /v1/tasks/{{id}} without bearer -> {st}")
-    st, err = http_json("GET", f"{base}/v1/tasks/task_x?access_token=tok_in_query_0123")
+    st, err = http_json("GET", query_token_fixture_url(base))
     check(st == 403 and err.get("code") == "auth.denied", f"token in query rejected -> {st}")
 
     srv.shutdown()
