@@ -20,7 +20,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from . import CONTRACT_VERSION, __version__
 from .client import BridgeClient
 from .config import ConfigError, SidecarConfig, describe
-from .ui.copy import copy_tables_for_html
+from .ui.copy import TASK_IN_FLIGHT_BODY, copy_tables_for_html, error_card
 from .ux import DEFAULT_TARGET, ROSTER, BridgeControlShell
 
 
@@ -48,20 +48,27 @@ HTML_SHELL = """<!DOCTYPE html>
  .result-summary{font-size:15px;margin:0 0 8px} .links a{color:#7fa0ff;display:block;margin:2px 0}
  .meta{color:#8e9198;font-size:12px;margin-top:8px}
  details{margin-top:8px;color:#8e9198;font-family:ui-monospace,monospace;font-size:12px}
+ .opt{display:block;text-align:left;background:#1a1d23;color:#e8eaed;border:1px solid #3c4043;border-radius:6px;padding:8px 10px;margin:4px 0}
+ .opt.selected{background:#1a2240;border-color:#7fa0ff}
+ .opt:disabled{opacity:0.5;cursor:not-allowed}
+ button:disabled{opacity:0.5;cursor:not-allowed}
 </style></head><body>
 <h1>Benchlink · Bridge Control <span class="muted">[Beta]</span></h1>
 <p class="muted">Companion sidecar UI. Pick → Compose/Send → Wait.</p>
 <div id="banner" class="banner" style="display:none"></div>
 <div class="card" id="pick">
   <strong>1 · Pick target</strong>
-  <div id="roster"></div>
+  <div id="roster" role="radiogroup" aria-label="Staff target"></div>
+  <p id="rosterLock" class="muted" style="display:none">End the current task to change target.</p>
 </div>
 <div class="card" id="compose">
   <strong>2 · Compose + Send</strong><br/>
-  Target: <span id="targetLabel">Floyd</span>
+  Target: <span id="targetLabel">Floyd · General Manager</span>
   <label><input type="checkbox" id="hp"/> High priority (also ping Floyd in chat)</label>
   <textarea id="goal" placeholder="Describe what you need."></textarea>
-  <button id="send">Send task</button>
+  <p id="sendHint" class="muted"></p>
+  <button id="send" disabled>Send task</button>
+  <p id="inflightNotice" class="banner" style="display:none"></p>
 </div>
 <div class="card" id="wait">
   <strong>3 · Status</strong>
@@ -92,17 +99,53 @@ const banner = document.getElementById('banner');
 if (offline) { banner.style.display='block'; banner.textContent = 'Offline / fail-closed: ' + offline + '. Send uses dry-run payloads (no DNS invented).'; }
 const rost = document.getElementById('roster');
 let target = '__DEFAULT__';
+let inflight = false;
 function displayName(key) {
   const e = roster.find(x => x.key === key);
   return e ? e.display : key;
 }
-roster.forEach(e => {
-  const b = document.createElement('button');
-  b.textContent = e.display + (e.default ? ' (default)' : '');
-  b.onclick = () => { target = e.key; document.getElementById('targetLabel').textContent = e.display; };
-  rost.appendChild(b);
-});
+function renderRoster() {
+  rost.innerHTML = '';
+  roster.forEach(e => {
+    const b = document.createElement('button');
+    b.type = 'button';
+    b.className = 'opt' + (e.key === target ? ' selected' : '');
+    b.setAttribute('role', 'radio');
+    b.setAttribute('aria-checked', e.key === target ? 'true' : 'false');
+    b.disabled = inflight;
+    let label = e.display;
+    if (e.default) label += ' · Default';
+    if (e.group === 'canary') label += ' · Canary';
+    b.textContent = label;
+    b.onclick = () => {
+      if (inflight) return;
+      target = e.key;
+      document.getElementById('targetLabel').textContent = e.display;
+      renderRoster();
+    };
+    rost.appendChild(b);
+  });
+  document.getElementById('rosterLock').style.display = inflight ? 'block' : 'none';
+}
+function updateSendEnabled() {
+  const goal = document.getElementById('goal').value.trim();
+  const btn = document.getElementById('send');
+  const hint = document.getElementById('sendHint');
+  if (inflight) {
+    btn.disabled = true;
+    hint.textContent = 'A task is in flight. End task first, then pick a target and send again.';
+  } else if (!goal) {
+    btn.disabled = true;
+    hint.textContent = '';
+  } else {
+    btn.disabled = false;
+    hint.textContent = '';
+  }
+}
+document.getElementById('goal').addEventListener('input', updateSendEnabled);
 document.getElementById('targetLabel').textContent = displayName(target);
+renderRoster();
+updateSendEnabled();
 
 function show(snap) {
   const pres = snap.presentation || {};
@@ -110,6 +153,9 @@ function show(snap) {
   const pill = document.getElementById('statusPill');
   pill.textContent = st.label;
   pill.className = 'pill ' + (st.tone || 'neutral');
+  inflight = snap.phase === 'wait';
+  renderRoster();
+  updateSendEnabled();
 
   const rc = document.getElementById('resultCard');
   const ec = document.getElementById('errorCard');
@@ -145,19 +191,37 @@ function show(snap) {
     document.getElementById('errHttp').textContent = (err.http != null ? err.http : '');
     document.getElementById('errCorr').textContent = err.correlation_id || '';
     const p = document.getElementById('errPrimary');
-    const s = document.getElementById('errSecondary');
+    const sbtn = document.getElementById('errSecondary');
     if (err.primary) { p.style.display = 'inline-block'; p.textContent = err.primary; } else { p.style.display = 'none'; }
-    if (err.secondary) { s.style.display = 'inline-block'; s.textContent = err.secondary; } else { s.style.display = 'none'; }
+    if (err.secondary) { sbtn.style.display = 'inline-block'; sbtn.textContent = err.secondary; } else { sbtn.style.display = 'none'; }
   }
 }
 
 document.getElementById('send').onclick = async () => {
   const goal = document.getElementById('goal').value.trim();
-  if (!goal) { alert('Compose a Staff task first'); return; }
+  if (!goal || inflight) return;
+  const notice = document.getElementById('inflightNotice');
+  notice.style.display = 'none';
   const r = await fetch('/_sidecar/ux/run', {method:'POST', headers:{'Content-Type':'application/json'},
     body: JSON.stringify({target, goal, high_priority: document.getElementById('hp').checked})});
   const j = await r.json();
-  if (!j.snapshot) { show({wait_status:'error', error:j, presentation:{status:COPY.status.error, error:{title:'Task couldn\\'t be sent', body:j.message || '', details_code:j.code || 'validation', primary:'Edit task', secondary:'Details'}}}); return; }
+  if (r.status === 409) {
+    const msg = (j.presentation && j.presentation.error && j.presentation.error.body)
+      || j.message
+      || 'A task is in flight. End task first, then pick a target and send again.';
+    notice.style.display = 'block';
+    notice.textContent = 'Task in progress. ' + msg;
+    return;
+  }
+  if (!j.snapshot) {
+    const err = (j.presentation && j.presentation.error) || {
+      title: r.status === 422 ? 'Can\'t route to target' : 'Task couldn\'t be sent',
+      body: j.message || '', details_code: j.code || 'validation',
+      primary: 'Edit task', secondary: 'Details'
+    };
+    show({wait_status:'error', phase:'error', error:j, presentation:{status:COPY.status.error, error:err}});
+    return;
+  }
   let snap = j.snapshot;
   show(snap);
   while (snap.phase === 'wait') {
@@ -168,9 +232,11 @@ document.getElementById('send').onclick = async () => {
 };
 document.getElementById('end').onclick = async () => {
   const snap = await (await fetch('/_sidecar/ux/end', {method:'POST'})).json();
+  document.getElementById('inflightNotice').style.display = 'none';
   show(snap);
   document.getElementById('goal').value = '';
   document.getElementById('hp').checked = false;
+  updateSendEnabled();
 };
 </script></body></html>
 """
@@ -240,14 +306,53 @@ def make_handler(cfg: SidecarConfig):
                 try:
                     body = self._read_json()
                     shell = live["shell"]
-                    if shell.phase.value in {"done", "error", "wait"}:
+                    # Ruling 1 / O1: refuse Send while Queued or Running; never silent restart.
+                    if shell.phase.value == "wait":
+                        env = error_envelope("validation", TASK_IN_FLIGHT_BODY, False)
+                        env["presentation"] = {
+                            "status": {"key": "error", "label": "Error", "tone": "danger"},
+                            "error": error_card("task_in_flight"),
+                        }
+                        return self._json(409, env)
+                    goal = str(body.get("goal") or "").strip()
+                    if not goal:
+                        return self._json(400, error_envelope(
+                            "validation", "Compose a non-empty Staff task before Send", False))
+                    target_key = str(body.get("target") or DEFAULT_TARGET)
+                    known = {e.key for e in ROSTER}
+                    if target_key not in known:
+                        env = error_envelope(
+                            "routing",
+                            f"unknown roster key {target_key!r}; known={sorted(known)}",
+                            False)
+                        env["presentation"] = {
+                            "status": {"key": "error", "label": "Error", "tone": "danger"},
+                            "error": error_card("routing", target_name=target_key),
+                        }
+                        return self._json(422, env)
+                    if shell.phase.value in {"done", "error"}:
                         shell.end_task()
                     out = shell.start_and_wait(
-                        goal=str(body.get("goal") or "Bridge Control HTML send"),
-                        target_key=str(body.get("target") or DEFAULT_TARGET),
+                        goal=goal,
+                        target_key=target_key,
                         high_priority=bool(body.get("high_priority")),
                         max_ticks=int(body.get("max_ticks") or 2))
                     return self._json(200, out)
+                except ValueError as e:
+                    env = error_envelope(
+                        "routing" if "unknown roster" in str(e) else "validation",
+                        str(e), False)
+                    code = 422 if env["code"] == "routing" else 400
+                    return self._json(code, env)
+                except RuntimeError as e:
+                    if "in flight" in str(e) or "mid-task" in str(e) or "mid-wait" in str(e):
+                        env = error_envelope("validation", TASK_IN_FLIGHT_BODY, False)
+                        env["presentation"] = {
+                            "status": {"key": "error", "label": "Error", "tone": "danger"},
+                            "error": error_card("task_in_flight"),
+                        }
+                        return self._json(409, env)
+                    return self._json(400, error_envelope("validation", str(e), False))
                 except Exception as e:  # noqa: BLE001 — surface to UI
                     return self._json(400, error_envelope("validation", str(e), False))
             if path == "/_sidecar/ux/poll":

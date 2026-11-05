@@ -48,14 +48,14 @@ class RosterEntry:
 
 # S2 static roster — Floyd default
 ROSTER: tuple[RosterEntry, ...] = (
-    RosterEntry("floyd", "Floyd · General Manager", "default router", "recommended", FLOYD_ID),
-    RosterEntry("ethan", "Ethan · Product", "canary", "canary", ETHAN_ID),
-    RosterEntry("amir", "Amir", "Design Lead", "leads", None),
-    RosterEntry("sofia", "Sofia", "Full-Stack", "leads", None),
-    RosterEntry("larry", "Larry", "Platform", "leads", None),
-    RosterEntry("claire", "Claire", "Ops/Secrets", "leads", None),
-    RosterEntry("maya", "Maya", "Staff", "leads", None),
-    RosterEntry("grace", "Grace", "Staff", "leads", None),
+    RosterEntry("floyd", "Floyd · General Manager", "General Manager", "recommended", FLOYD_ID),
+    RosterEntry("ethan", "Ethan · Product", "Product", "canary", ETHAN_ID),
+    RosterEntry("amir", "Amir · Design", "Design", "leads", None),
+    RosterEntry("sofia", "Sofia · Full-Stack", "Full-Stack", "leads", None),
+    RosterEntry("larry", "Larry · Delivery", "Delivery", "leads", None),
+    RosterEntry("claire", "Claire · Ops", "Ops", "leads", None),
+    RosterEntry("maya", "Maya · Marketing", "Marketing", "leads", None),
+    RosterEntry("grace", "Grace · Client Success", "Client Success", "leads", None),
 )
 DEFAULT_TARGET = "floyd"
 
