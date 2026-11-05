@@ -166,6 +166,7 @@ def test_offline_retry_never_resets_uncertain_nonterminal_task(terminal_sidecar,
     sync = pytest.importorskip("playwright.sync_api")
     shell, base, calls = terminal_sidecar
     shell.error["code"] = "offline"
+    shell.task_accepted = True
     shell.result = {"status": result_status} if result_status else None
     with sync.sync_playwright() as p:
         browser = p.chromium.launch(headless=True, args=["--no-sandbox"])
@@ -174,14 +175,15 @@ def test_offline_retry_never_resets_uncertain_nonterminal_task(terminal_sidecar,
         page.route("**/*", lambda r: r.continue_() if r.request.url.startswith(base + "/") else r.abort())
         page.goto(base)
         page.evaluate("snap => show(snap)", shell.snapshot())
-        with page.expect_response(lambda r: r.url.endswith("/v1/health") and r.status == 200):
-            page.locator("#errPrimary").click()
-        # Await another complete Retry to verify the asynchronous health-only path.
+        # Await the complete action. Beta 03 resumes this accepted task; lower
+        # branches only health-check. Neither is allowed to reset or replace it.
         page.evaluate("actions.Retry()")
-        assert page.evaluate("lastSnapshot.phase") == "error"
+        resumes = hasattr(shell, "can_resume_interrupted_wait")
+        assert page.evaluate("lastSnapshot.phase") == ("done" if resumes else "error")
         assert page.evaluate("lastSnapshot.task_id") == "task_terminal"
-        assert shell.phase == Phase.ERROR and shell.session_id == "sess_terminal"
+        assert shell.phase == (Phase.DONE if resumes else Phase.ERROR)
+        assert shell.session_id == "sess_terminal"
         assert calls.count("sessionClose") == calls.count("taskCreate") == 0
-        assert calls.count("taskGet") == 0
+        assert calls.count("taskGet") == (1 if resumes else 0)
         assert calls.count("health") >= 1
         browser.close()
