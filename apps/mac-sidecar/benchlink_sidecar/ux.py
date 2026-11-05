@@ -23,7 +23,7 @@ from typing import Callable
 
 from .client import AuthNotPaired, BridgeClient, PreparedRequest
 from .ui.copy import error_card, result_card, status_token
-from .config import ConfigError, SidecarConfig, describe
+from .config import ConfigError, SidecarConfig, ui_config
 
 # Soft-lock constants (must stay true for MVP shell)
 O1_NO_MID_TASK_HANDOFF = True
@@ -58,6 +58,10 @@ ROSTER: tuple[RosterEntry, ...] = (
     RosterEntry("grace", "Grace · Client Success", "Client Success", "leads", None),
 )
 DEFAULT_TARGET = "floyd"
+
+
+class TaskInFlight(RuntimeError):
+    """The current task must be explicitly ended before another dispatch."""
 
 
 class Phase(str, Enum):
@@ -155,7 +159,7 @@ class BridgeControlShell:
     def pick(self, target_key: str = DEFAULT_TARGET) -> None:
         """Phase 1: Pick target. O1: only allowed from PICK / DONE / ERROR (not mid-WAIT)."""
         if self.phase == Phase.WAIT and O1_NO_MID_TASK_HANDOFF:
-            raise RuntimeError("O1: mid-task handoff forbidden; End task first, then re-pick")
+            raise TaskInFlight("O1: mid-task handoff forbidden; End task first, then re-pick")
         keys = {e.key for e in ROSTER}
         if target_key not in keys:
             raise ValueError(f"unknown roster key {target_key!r}; known={sorted(keys)}")
@@ -180,7 +184,7 @@ class BridgeControlShell:
         if self.phase not in {Phase.COMPOSE, Phase.PICK}:
             # Allow re-compose only before send; after send must End first (O1)
             if self.phase == Phase.WAIT and O1_NO_MID_TASK_HANDOFF:
-                raise RuntimeError("O1: cannot recompose mid-wait; End task first")
+                raise TaskInFlight("O1: cannot recompose mid-wait; End task first")
         if self.phase == Phase.PICK:
             self.pick(self.target_key)
         goal = (goal or "").strip()
@@ -280,6 +284,17 @@ class BridgeControlShell:
             self.phase = Phase.ERROR
             self.error = {"code": "offline", "message": str(e)}
             return {"wait_status": self.wait_status.value, "error": self.error}
+        # All live errors fail closed, even malformed bodies or a spurious result.
+        if st >= 400 or not isinstance(body, dict) or body.get("type") != "task.result":
+            code = body.get("code", "internal") if isinstance(body, dict) else "internal"
+            if st == 501:
+                code = "internal"
+            card = error_card(code)
+            self.wait_status = WaitStatus.ERROR
+            self.phase = Phase.ERROR
+            self.error = {"code": card["details_code"], "message": card["body"],
+                          "http": st, "correlation_id": body.get("correlation_id") if isinstance(body, dict) else None}
+            return {"wait_status": self.wait_status.value, "http": st, "error": self.error}
         if isinstance(body, dict) and body.get("type") == "task.result":
             status = body.get("status")
             if status in {"accepted"}:
@@ -300,20 +315,11 @@ class BridgeControlShell:
             else:
                 self.wait_status = WaitStatus.RUNNING
             return {"wait_status": self.wait_status.value, "http": st, "body": body}
-        # Stub daemon (501) only: simulated local progression for the UX shell
-        if st == 501:
-            return self._simulate_wait_tick()
-        if st >= 400 and isinstance(body, dict) and body.get("type") == "error":
-            self.wait_status = WaitStatus.ERROR
-            self.phase = Phase.ERROR
-            self.error = {"code": body.get("code"), "message": body.get("message"), "http": st,
-                          "correlation_id": body.get("correlation_id")}
-            return {"wait_status": self.wait_status.value, "http": st, "error": self.error}
-        self.wait_status = WaitStatus.RUNNING
-        return {"wait_status": self.wait_status.value, "http": st, "body": body}
 
     def _simulate_wait_tick(self) -> dict:
         """Offline demo: local status only — does NOT invent DNS or call upstream."""
+        if not self.dry_run_mode:
+            raise RuntimeError("Simulation is available only in explicit dry-run mode")
         progression = {
             WaitStatus.QUEUED: WaitStatus.RUNNING,
             WaitStatus.RUNNING: WaitStatus.RESULT,
@@ -396,10 +402,10 @@ class BridgeControlShell:
             "dry_run_mode": self.dry_run_mode,
             "offline_banner": self.offline_banner,
             "result": self.result,
-            "error": self.error,
+            "error": ({**self.error, "message": presentation["error"]["body"]} if self.error else None),
             "presentation": presentation,
             "soft_locks": self.soft_locks(),
-            "config": describe(self.cfg),
+            "config": ui_config(self.cfg),
             "roster": self.roster(),
         }
 
@@ -407,7 +413,7 @@ class BridgeControlShell:
                        high_priority: bool = False, max_ticks: int | None = None) -> dict:
         """Pick → Compose → Send → Wait (bounded); leaves state for later polls / End."""
         if self.phase == Phase.WAIT:
-            raise RuntimeError("O1: a task is in flight; End task first")
+            raise TaskInFlight("O1: a task is in flight; End task first")
         self.pick(target_key)
         self.compose(goal, high_priority=high_priority)
         send_info = self.send()
