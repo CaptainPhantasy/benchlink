@@ -373,6 +373,20 @@ class BridgeControlShell:
         self.last_session_req = None
         self.last_task_req = None
 
+    def retry_terminal_error(self) -> None:
+        """Explicit Retry returns a terminal failure to Pick, without dispatch.
+
+        Keep the draft; only a later operator Send creates another task (O1).
+        Repeated retries in Pick are harmless and never close another session.
+        """
+        if self.phase == Phase.WAIT:
+            raise RuntimeError("A task is in flight. End task first.")
+        if self.phase != Phase.ERROR:
+            return
+        target, goal, high_priority = self.target_key, self.goal, self.high_priority
+        self.end_task()
+        self.target_key, self.goal, self.high_priority = target, goal, high_priority
+
     def snapshot(self) -> dict:
         entry = next((e for e in ROSTER if e.key == self.target_key), None)
         target_name = entry.display if entry else self.target_key

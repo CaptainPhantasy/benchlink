@@ -100,6 +100,7 @@ const banner = $('banner');
 if (offline) { banner.style.display='block'; banner.textContent = "Preview mode. The bridge address isn't set on this Mac."; }
 const rost = $('roster');
 let target = '__DEFAULT__';
+let recovering = false;
 let inflight = false, sending = false, lastSnapshot = {}, lastSent = null, viewKey = '';
 const HELP_URL = 'https://github.com/CaptainPhantasy/benchlink/blob/main/docs/PAIRING_PROOF_RUNBOOK.md';
 function displayName(key) { return (roster.find(x => x.key === key) || {}).display || key; }
@@ -137,7 +138,7 @@ function renderRoster() {
   $('rosterLock').hidden=!inflight;
 }
 function updateSendEnabled() {
-  $('send').disabled=sending || inflight || !$('goal').value.trim();
+  $('send').disabled=recovering || sending || inflight || !$('goal').value.trim();
   $('sendHint').textContent=inflight ? 'A task is in flight. End task first, then pick a target and send again.' : '';
   $('goal').readOnly=inflight; $('hp').disabled=inflight;
 }
@@ -173,6 +174,28 @@ async function retryPoll() {
   try { const {r,j}=await post('/_sidecar/ux/poll'); if (!r.ok) showError(j); else show(j); }
   catch (e) { showError({code:'offline'}); }
 }
+async function retryTerminal() {
+  if (recovering || sending || inflight) return;
+  recovering=true; updateSendEnabled();
+  try {
+    const {r,j}=await post('/_sidecar/ux/retry');
+    if (!r.ok) {
+      showError(j);
+      if (r.status===409) { inflight=true; renderRoster(); updateSendEnabled(); }
+      return;
+    }
+    // The server keeps the draft and never dispatches here. Send remains explicit.
+    target=j.target || target; $('targetLabel').textContent=displayName(target);
+    $('goal').value=j.goal || ''; $('hp').checked=!!j.high_priority;
+    show(j); renderRoster();
+  } catch (e) { showError({code:'offline'}); }
+  finally { recovering=false; updateSendEnabled(); }
+}
+async function retryTask() {
+  if (recovering || sending || inflight) return;
+  if (lastSnapshot.phase==='error') return retryTerminal();
+  return retryPoll();
+}
 async function resend(toFloyd=false) {
   const saved = lastSent || {goal:$('goal').value, target, high_priority:$('hp').checked};
   if (!await endTask(false)) return;
@@ -184,7 +207,7 @@ const actions = {
     if (((lastSnapshot.presentation || {}).error || {}).details_code === 'offline') {
       try { const r=await fetch('/v1/health'); if (!r.ok) showError({code:'offline'}); else banner.style.display='none'; }
       catch (e) { showError({code:'offline'}); }
-    } else await retryPoll();
+    } else await retryTask();
   },
   'End task': () => endTask(), 'New task': () => endTask(),
   'Edit task': () => { $('goal').readOnly=false; $('goal').focus(); },
@@ -238,7 +261,7 @@ function show(snap) {
   }
 }
 async function sendTask() {
-  const goal=$('goal').value.trim(); if (!goal || sending || inflight) return;
+  const goal=$('goal').value.trim(); if (!goal || recovering || sending || inflight) return;
   $('inflightNotice').style.display='none'; sending=true; updateSendEnabled(); $('send').textContent='Sending';
   lastSent={target,goal,high_priority:$('hp').checked};
   try {
@@ -383,6 +406,21 @@ def make_handler(cfg: SidecarConfig):
                     env = error_envelope("internal", "Something went wrong on the bridge", False)
                     env["presentation"] = {"error": error_card("internal")}
                     return self._json(500, env)
+                finally:
+                    run_lock.release()
+            if path == "/_sidecar/ux/retry":
+                if not run_lock.acquire(blocking=False):
+                    env = error_envelope("validation", "Task in progress", False)
+                    env["presentation"] = {"error": error_card("task_in_flight")}
+                    return self._json(409, env)
+                try:
+                    shell = live["shell"]
+                    if shell.phase.value == "wait":
+                        env = error_envelope("validation", "Task in progress", False)
+                        env["presentation"] = {"error": error_card("task_in_flight")}
+                        return self._json(409, env)
+                    shell.retry_terminal_error()
+                    return self._json(200, shell.snapshot())
                 finally:
                     run_lock.release()
             if path == "/_sidecar/ux/poll":
