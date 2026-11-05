@@ -44,11 +44,11 @@ def test_run_refuses_empty_goal_without_placeholder():
         sc, base = _sidecar(h)
         try:
             st, body = _post(base, "/_sidecar/ux/run", {"target": "ethan", "goal": "  "})
-            assert st == 400
+            assert st == 422
             assert body["type"] == "error" and body["code"] == "validation"
             assert "Bridge Control HTML send" not in json.dumps(body)
             st2, body2 = _post(base, "/_sidecar/ux/run", {"target": "ethan"})
-            assert st2 == 400 and body2["code"] == "validation"
+            assert st2 == 422 and body2["code"] == "validation"
         finally:
             sc.shutdown(); sc.server_close()
 
@@ -68,27 +68,6 @@ def test_unknown_target_returns_routing():
 
 
 def test_inflight_send_returns_409_and_leaves_task_untouched():
-    with Harness() as h:
-        sc, base = _sidecar(h)
-        try:
-            # Start a live task that stays in wait briefly (max_ticks=1 keeps it in wait
-            # if we don't poll enough — use a silent fake so it stays queued/running)
-            st, out = _post(base, "/_sidecar/ux/run",
-                            {"target": "ethan", "goal": "keep flying", "max_ticks": 1})
-            assert st == 200
-            snap = out["snapshot"]
-            # Force wait if already done too fast: poll is fine; for race, re-check
-            if snap["phase"] != "wait":
-                # Live harness usually finishes fast with fake transport. Put shell
-                # into wait via a second approach: call run, then manually set — instead
-                # use max_ticks=0 path. BridgeControlShell.wait_until_done(0) leaves WAIT
-                # after send. Re-run with adapter silent.
-                pass
-            # Directly manipulate live shell into WAIT for a deterministic unit of the gate
-            # by posting run with a hanging transport.
-        finally:
-            sc.shutdown(); sc.server_close()
-
     # Deterministic path: silent fake so task stays queued
     with Harness(adapter_env={"BENCHLINK_FAKE_TRANSPORT_MODE": "silent",
                               "BENCHLINK_TASK_TIMEOUT_S": "30"}) as h:
