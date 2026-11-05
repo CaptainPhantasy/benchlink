@@ -14,13 +14,14 @@ Everything else -> 404 error envelope.
 from __future__ import annotations
 
 import json
+import threading
 import uuid
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 from . import CONTRACT_VERSION, __version__
 from .client import BridgeClient
 from .config import ConfigError, SidecarConfig, describe
-from .ux import DEFAULT_TARGET, ROSTER, BridgeControlShell
+from .ux import DEFAULT_TARGET, ROSTER, BridgeControlShell, TaskInFlight
 from .request_guard import request_denial
 
 
@@ -53,54 +54,87 @@ HTML_SHELL = """<!DOCTYPE html>
   Target: <span id="targetLabel">floyd</span>
   <label><input type="checkbox" id="hp"/> High priority (Floyd chat) — O3 default OFF</label>
   <textarea id="goal" placeholder="Type Staff task here in Bridge Control…"></textarea>
-  <button id="send">Send task</button>
+  <button id="send" disabled>Send task</button>
 </div>
 <div class="card" id="wait">
   <strong>3 · Wait · Bridge status</strong>
   <div id="status" class="muted">Idle</div>
   <pre id="result" style="white-space:pre-wrap"></pre>
+  <button id="retry" hidden>Retry</button>
   <button id="end">End task → re-pick</button>
 </div>
 <script>
 const roster = __ROSTER__;
 const offline = __OFFLINE__;
 const banner = document.getElementById('banner');
-if (offline) { banner.style.display='block'; banner.textContent = 'Offline / fail-closed: ' + offline + ' — Send uses dry-run payloads (no DNS invented).'; }
-const rost = document.getElementById('roster');
-let target = '__DEFAULT__';
-roster.forEach(e => {
-  const b = document.createElement('button');
-  b.textContent = e.display + (e.default ? ' (default)' : '');
-  b.onclick = () => { target = e.key; document.getElementById('targetLabel').textContent = e.key; };
-  rost.appendChild(b);
-});
-document.getElementById('send').onclick = async () => {
-  const goal = document.getElementById('goal').value.trim();
-  if (!goal) { alert('Compose a Staff task first'); return; }
-  const r = await fetch('/_sidecar/ux/run', {method:'POST', headers:{'Content-Type':'application/json'},
-    body: JSON.stringify({target, goal, high_priority: document.getElementById('hp').checked})});
-  const j = await r.json();
-  const show = (snap) => {
-    const err = snap.error ? (' error=' + snap.error.code) : '';
-    document.getElementById('status').textContent = 'status=' + snap.wait_status + ' phase=' + snap.phase + err;
-    document.getElementById('result').textContent = JSON.stringify(snap.result || snap.error || {}, null, 2);
-  };
-  if (!j.snapshot) { document.getElementById('result').textContent = JSON.stringify(j, null, 2); return; }
-  show(j.snapshot);
-  let snap = j.snapshot;
-  while (snap.phase === 'wait') {
-    await new Promise(res => setTimeout(res, 2000));
-    snap = await (await fetch('/_sidecar/ux/poll', {method:'POST'})).json();
-    show(snap);
+if (offline) { banner.style.display='block'; banner.textContent='Offline / fail-closed: '+offline+' — Send uses dry-run payloads.'; }
+let target='__DEFAULT__', lastSnapshot={}, ownedSnapshot=null;
+let busy=false, loaded=false, requestUncertain=false, localFailure=false, timer=null;
+function pending() { return requestUncertain || lastSnapshot.task_in_flight===true || ownedSnapshot!==null; }
+function controls() {
+  document.getElementById('send').disabled=!loaded || busy || pending();
+  document.getElementById('end').disabled=!loaded || busy || pending();
+  document.getElementById('retry').hidden=!(localFailure || lastSnapshot.phase==='error');
+  document.getElementById('retry').disabled=busy;
+  document.querySelectorAll('#roster button').forEach(b=>b.disabled=busy || pending());
+}
+function show(snap) {
+  if (!snap || typeof snap.task_in_flight!=='boolean') throw new Error('Task ownership unavailable');
+  lastSnapshot=snap;
+  if (snap.task_in_flight) ownedSnapshot={...snap};
+  else { ownedSnapshot=null; requestUncertain=false; }
+  localFailure=false;
+  document.getElementById('status').textContent='status='+snap.wait_status+' phase='+snap.phase+(snap.error ? ' error='+snap.error.code : '');
+  document.getElementById('result').textContent=JSON.stringify(snap.result || snap.error || {},null,2);
+  if (snap.phase==='pick' || snap.phase==='compose') {
+    document.getElementById('goal').value=snap.goal || '';
+    document.getElementById('hp').checked=!!snap.high_priority;
   }
-};
-document.getElementById('end').onclick = async () => {
-  await fetch('/_sidecar/ux/end', {method:'POST'});
-  document.getElementById('status').textContent = 'Idle (ended → re-pick)';
-  document.getElementById('result').textContent = '';
-  document.getElementById('goal').value = '';
-  document.getElementById('hp').checked = false;
-};
+  if (snap.target) { target=snap.target; document.getElementById('targetLabel').textContent=target; }
+  controls();
+}
+async function post(path,body={}) {
+  const r=await fetch(path,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(body)});
+  const j=await r.json();
+  if (!r.ok) throw new Error(typeof j.code==='string' ? j.code : 'Request failed');
+  return j.snapshot || j;
+}
+function schedule() {
+  clearTimeout(timer);
+  if (lastSnapshot.phase==='wait') timer=setTimeout(()=>action('poll'),2000);
+}
+async function action(kind) {
+  if (busy || !loaded) return;
+  if (kind==='run' && pending()) return;
+  const body=kind==='run' ? {target,goal:document.getElementById('goal').value.trim(),high_priority:document.getElementById('hp').checked,max_ticks:1} : {};
+  if (kind==='run' && !body.goal) return;
+  if (kind==='run') requestUncertain=true;
+  if (kind==='retry' && pending()) kind='poll'; // GET the stored original, even after a lost local run reply
+  busy=true;controls();
+  try { show(await post('/_sidecar/ux/'+kind,body)); }
+  catch (e) {
+    localFailure=true; // never clear task ownership on a presentation/fetch/HTTP failure
+    document.getElementById('status').textContent='Error: '+e.message+(pending() ? ' — Retry checks the original task; Send stays locked.' : '');
+  }
+  finally { busy=false;controls();schedule(); }
+}
+roster.forEach(e=>{
+  const b=document.createElement('button');b.textContent=e.display+(e.default ? ' (default)' : '');
+  b.onclick=()=>{ if (!pending() && !busy) { target=e.key;document.getElementById('targetLabel').textContent=e.key; } };
+  document.getElementById('roster').appendChild(b);
+});
+document.getElementById('send').onclick=()=>action('run');
+document.getElementById('retry').onclick=()=>action('retry');
+document.getElementById('end').onclick=()=>action('end');
+async function bootstrap() {
+  try {
+    const r=await fetch('/_sidecar/ux');
+    if (!r.ok) throw new Error('Task status unavailable');
+    show(await r.json());loaded=true;
+  } catch (e) { document.getElementById('status').textContent='Task status unavailable; reload to retry.'; }
+  controls();schedule();
+}
+controls();bootstrap();
 </script></body></html>
 """
 
@@ -109,12 +143,13 @@ def make_handler(cfg: SidecarConfig):
     client = BridgeClient(cfg)
     # One in-memory Bridge Control session per sidecar process (O4 session-only retention)
     live = {"shell": BridgeControlShell(cfg, client=client)}
+    run_lock = threading.Lock()
 
     class Handler(BaseHTTPRequestHandler):
         server_version = f"benchlink-mac-sidecar/{__version__}"
 
-        def _json(self, status: int, payload: dict):
-            body = json.dumps(payload).encode()
+        def _json(self, status: int, payload: dict | bytes):
+            body = payload if isinstance(payload, bytes) else json.dumps(payload).encode()
             self.send_response(status)
             self.send_header("Content-Type", "application/json")
             self.send_header("Content-Length", str(len(body)))
@@ -172,36 +207,59 @@ def make_handler(cfg: SidecarConfig):
                                         "config": describe(cfg),
                                         "roster_keys": [e.key for e in ROSTER]})
             if path == "/_sidecar/ux":
-                return self._json(200, BridgeControlShell(cfg).snapshot())
+                with run_lock:
+                    body = json.dumps(live["shell"].snapshot()).encode()
+                return self._json(200, body)
             return self._json(404, error_envelope("validation", f"no route {path}", False))
+
+        def _task_response(self, path):
+            shell = live["shell"]
+            if path == "/_sidecar/ux/run":
+                if shell.has_unfinished_task():
+                    return 409, error_envelope("validation", "Completion is not confirmed; Retry checks the original task", False)
+                body = self._read_json()
+                goal = str(body.get("goal") or "").strip()
+                if not goal:
+                    return 422, error_envelope("validation", "Compose a non-empty task", False)
+                if shell.phase.value in {"done", "error"}:
+                    shell.end_task()
+                out = shell.start_and_wait(goal=goal,
+                    target_key=str(body.get("target") or DEFAULT_TARGET),
+                    high_priority=bool(body.get("high_priority")),
+                    max_ticks=int(body.get("max_ticks") or 2))
+                return 200, {"snapshot": out["snapshot"], "send": {"mode": out.get("send", {}).get("mode")}}
+            if path == "/_sidecar/ux/end":
+                shell.end_task()  # same central guard: End is NOT cancellation
+            elif path == "/_sidecar/ux/retry":
+                shell.retry_terminal_error()
+            elif path == "/_sidecar/ux/poll":
+                if shell.can_resume_interrupted_wait():
+                    shell.resume_interrupted_wait()
+                elif shell.phase.value == "wait":
+                    shell.wait_once()
+            return 200, shell.snapshot()
 
         def do_POST(self):  # noqa: N802
             if not self._allow_request(mutation=True):
                 return
             path = self.path.split("?", 1)[0]
-            if path == "/_sidecar/ux/run":
+            if path not in {"/_sidecar/ux/run", "/_sidecar/ux/poll", "/_sidecar/ux/retry", "/_sidecar/ux/end"}:
+                return self._json(404, error_envelope("validation", f"no route {path}", False))
+            if not run_lock.acquire(blocking=False):
+                return self._json(409, error_envelope("validation", "Task operation in progress", False))
+            try:
                 try:
-                    body = self._read_json()
-                    shell = live["shell"]
-                    if shell.phase.value in {"done", "error", "wait"}:
-                        shell.end_task()
-                    out = shell.start_and_wait(
-                        goal=str(body.get("goal") or "Bridge Control HTML send"),
-                        target_key=str(body.get("target") or DEFAULT_TARGET),
-                        high_priority=bool(body.get("high_priority")),
-                        max_ticks=int(body.get("max_ticks") or 2))
-                    return self._json(200, out)
-                except Exception as e:  # noqa: BLE001 — surface to UI
-                    return self._json(400, error_envelope("validation", str(e), False))
-            if path == "/_sidecar/ux/poll":
-                shell = live["shell"]
-                if shell.phase.value == "wait":
-                    shell.wait_once()
-                return self._json(200, shell.snapshot())
-            if path == "/_sidecar/ux/end":
-                live["shell"].end_task()
-                return self._json(200, live["shell"].snapshot())
-            return self._json(404, error_envelope("validation", f"no route {path}", False))
+                    status, payload = self._task_response(path)
+                except TaskInFlight:
+                    status, payload = 409, error_envelope("validation", "Completion is not confirmed; Retry checks the original task", False)
+                except (ValueError, RuntimeError):
+                    status, payload = 422, error_envelope("validation", "Task operation rejected", False)
+                except Exception:
+                    status, payload = 500, error_envelope("internal", "Bridge operation failed", False)
+                body = json.dumps(payload).encode()  # freeze under lock, not during response transport
+            finally:
+                run_lock.release()
+            return self._json(status, body)
 
         def log_message(self, fmt, *args):
             pass

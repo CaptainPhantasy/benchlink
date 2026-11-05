@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import json
 import os
+from importlib.resources import files
 from functools import lru_cache
 from pathlib import Path
 
@@ -10,8 +11,13 @@ from jsonschema import Draft202012Validator
 from referencing import Registry, Resource
 from referencing.jsonschema import DRAFT202012
 
-ROOT = Path(__file__).resolve().parents[3]
-SCHEMAS_DIR = Path(os.environ.get("BENCHLINK_SCHEMAS_DIR") or ROOT / "packages/bridge-protocol/schemas")
+_packaged_schemas = files("benchlink_daemon").joinpath("schemas")
+if os.environ.get("BENCHLINK_SCHEMAS_DIR"):
+    SCHEMAS_DIR = Path(os.environ["BENCHLINK_SCHEMAS_DIR"])
+elif _packaged_schemas.is_dir():
+    SCHEMAS_DIR = _packaged_schemas
+else:  # source-tree execution only; installed wheels carry package resources.
+    SCHEMAS_DIR = Path(__file__).resolve().parents[3] / "packages/bridge-protocol/schemas"
 
 TYPE_TO_SCHEMA = {
     "health.ping": "health_ping", "health.pong": "health_pong",
@@ -27,7 +33,9 @@ TYPE_TO_SCHEMA = {
 @lru_cache(maxsize=1)
 def _registry():
     res = []
-    for p in SCHEMAS_DIR.glob("*.schema.json"):
+    for p in SCHEMAS_DIR.iterdir():
+        if not p.name.endswith(".schema.json"):
+            continue
         raw = json.loads(p.read_text())
         res.append((raw["$id"], Resource.from_contents(raw, default_specification=DRAFT202012)))
     return Registry().with_resources(res)

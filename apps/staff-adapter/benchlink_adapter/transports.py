@@ -21,6 +21,7 @@ from datetime import datetime, timezone
 
 from .config import AdapterConfig, sender_key_env, webhook_url_env
 from .errors import BridgeError
+from .http_transport import open_no_redirects
 from .results import ResultSource, post_callback
 
 
@@ -64,7 +65,7 @@ class WebhookTransport(Transport):
                                      method="POST", headers=headers)
         t0 = time.monotonic()
         try:
-            with urllib.request.urlopen(req, timeout=self.cfg.webhook_timeout_s) as r:
+            with open_no_redirects(req, timeout=self.cfg.webhook_timeout_s) as r:
                 status = r.status
         except urllib.error.HTTPError as e:
             if e.code in (401, 403):

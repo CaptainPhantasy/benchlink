@@ -34,6 +34,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 from .errors import BridgeError
+from .http_transport import open_no_redirects
 
 RESULT_TOKEN_HEADER = "X-Benchlink-Result-Token"
 CALLBACK_PATH_PREFIX = "/_bridge/results/"   # non-contract (OpenAPI is frozen)
@@ -175,7 +176,7 @@ def _default_http_post(url: str, form: dict, timeout: float) -> dict:
     req = urllib.request.Request(url, data=data, method="POST",
                                  headers={"Content-Type": "application/x-www-form-urlencoded"})
     try:
-        with urllib.request.urlopen(req, timeout=timeout) as r:
+        with open_no_redirects(req, timeout=timeout) as r:
             return json.loads(r.read() or b"{}")
     except urllib.error.HTTPError as e:
         if e.code in (400, 401, 403):
@@ -369,15 +370,16 @@ class HttpCallbackResultSource(ResultSource):
 
     def accept(self, task_id: str, token: str | None, payload: dict) -> None:
         """Called by the daemon endpoint (payload already schema-validated)."""
-        with self._lock:
-            entry = self._tokens.get(task_id)
         if not token:
             raise BridgeError("auth.unpaired", f"missing {RESULT_TOKEN_HEADER}")
-        if not entry or not hmac.compare_digest(entry[0].encode(), token.encode("utf-8", "replace")):
-            raise BridgeError("auth.denied", "result token not valid for this task")
-        if time.time() > entry[1]:
-            raise BridgeError("auth.expired", "result token expired")
+        # Lookup, validation, final consume and publication are one transaction.
+        # Otherwise concurrent callbacks can both authorize a single-use token.
         with self._lock:
+            entry = self._tokens.get(task_id)
+            if not entry or not hmac.compare_digest(entry[0].encode(), token.encode("utf-8", "replace")):
+                raise BridgeError("auth.denied", "result token not valid for this task")
+            if time.time() > entry[1]:
+                raise BridgeError("auth.expired", "result token expired")
             self._inbox[task_id] = payload
             if payload.get("status") in {"succeeded", "failed"}:
                 self._tokens.pop(task_id, None)  # single use for final results
@@ -404,7 +406,7 @@ def post_callback(delivery: dict, payload: dict, timeout: float = 5.0) -> int:
         delivery["url"], data=json.dumps(payload).encode(), method="POST",
         headers={"Content-Type": "application/json", delivery["token_header"]: delivery["token"]})
     try:
-        with urllib.request.urlopen(req, timeout=timeout) as r:
+        with open_no_redirects(req, timeout=timeout) as r:
             return r.status
     except urllib.error.HTTPError as e:
         return e.code

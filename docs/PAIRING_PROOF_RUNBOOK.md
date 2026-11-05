@@ -5,8 +5,29 @@ Repo: `CaptainPhantasy/benchlink` (private) — `scripts/pairing-proof.sh`. Impl
 ## Prerequisites (in order)
 1. **Sofia:** pairing + bearer landed (green on loopback 2026-11-05); merged by Douglas.
 2. **Larry:** daemon behind `tailscale serve` at `https://inference.tail58d565.ts.net:19740` (tailnet only, no Funnel), `BENCHLINK_REQUIRE_TAILSCALE_IDENTITY=1`. Confirm the Mac mini is an untagged node.
-3. **Douglas OK — enrollment (out of band):** operator adds `{device_id: {public_key_b64url}}` to `BENCHLINK_DEVICE_ALLOWLIST_PATH` on inference (outside repo). The pair request carries no public key.
+3. **Douglas OK — enrollment (out of band):** operator adds `{device_id: {public_key_b64url, tailscale_identity}}` to `BENCHLINK_DEVICE_ALLOWLIST_PATH` on inference (outside repo). The pair request carries no public key.
 4. Device Ed25519 private key file at `BENCHLINK_DEVICE_KEY_PATH` (sidecar key file, mode 0600). This is the only key source. OpenSSL 3 (`brew install openssl@3`).
+
+## Enrollment identity (required with the setting above)
+Use the Mac owner's actual tailnet login, exactly as trusted `tailscale serve` supplies
+`Tailscale-User-Login`. Do not use the device hostname or invent a login. Generate the
+public enrollment snippet with `benchlink-sidecar generate-key --tailscale-identity
+<actual Mac owner tailnet login>`; add it out of band only with Douglas's approval.
+The allowlist entry must have this shape (replace placeholders, keep the private key off the daemon):
+
+```json
+{
+  "<device_id>": {
+    "public_key_b64url": "<generated Ed25519 public key, base64url without padding>",
+    "tailscale_identity": "<actual Mac owner tailnet login>",
+    "scopes": ["session.create", "session.message", "session.close", "task.create"]
+  }
+}
+```
+
+Missing/mismatched `tailscale_identity` causes `auth.denied` when identity enforcement
+is on. Omitted `scopes` uses the four documented defaults; an explicit `"scopes": []`
+denies every requested scope. Scope names are the exact frozen wire enums above.
 
 ## One command (Mac mini)
 ```bash
