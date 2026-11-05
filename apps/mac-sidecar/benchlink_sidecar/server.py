@@ -36,8 +36,8 @@ HTML_SHELL = """<!DOCTYPE html>
  body{font:14px/1.4 system-ui,sans-serif;margin:24px;max-width:720px;background:#0f1115;color:#e8eaed}
  h1{font-size:18px;margin:0 0 8px} .muted{color:#9aa0a6}
  .card{border:1px solid #3c4043;border-radius:8px;padding:12px;margin:12px 0;background:#1a1d23}
- button{margin:4px 4px 4px 0;padding:6px 10px;cursor:pointer}
- textarea{width:100%;min-height:80px;background:#0f1115;color:#e8eaed;border:1px solid #3c4043;border-radius:6px;padding:8px}
+ label[for="goal"]{display:block;margin-top:8px} button{margin:4px 4px 4px 0;padding:6px 10px;cursor:pointer}
+ textarea{box-sizing:border-box;width:100%;min-height:80px;background:#0f1115;color:#e8eaed;border:1px solid #3c4043;border-radius:6px;padding:8px}
  .banner{background:#3a2a00;border:1px solid #f9ab00;padding:8px;border-radius:6px;margin:8px 0}
  .pill{display:inline-block;padding:2px 10px;border-radius:999px;font-weight:600;font-size:12px}
  .pill.neutral{background:#2c2e33;color:#b4b6bc}
@@ -50,7 +50,7 @@ HTML_SHELL = """<!DOCTYPE html>
  details{margin-top:8px;color:#8e9198;font-family:ui-monospace,monospace;font-size:12px}
 </style></head><body>
 <h1>Benchlink · Bridge Control <span class="muted">[Beta]</span></h1>
-<p class="muted">Companion sidecar UI. Pick → Compose/Send → Wait.</p>
+<p class="muted">Send a task to Floyd's Labs staff.</p>
 <div id="banner" class="banner" style="display:none"></div>
 <div class="card" id="pick">
   <strong>1 · Pick target</strong>
@@ -60,26 +60,31 @@ HTML_SHELL = """<!DOCTYPE html>
   <strong>2 · Compose + Send</strong><br/>
   Target: <span id="targetLabel">Floyd</span>
   <label><input type="checkbox" id="hp"/> High priority (also ping Floyd in chat)</label>
-  <textarea id="goal" placeholder="Describe what you need."></textarea>
+  <label for="goal">Staff task</label><p id="goalHelp" class="muted">Describe what you need.</p>
+  <textarea id="goal" aria-describedby="goalHelp" placeholder="Describe what you need."></textarea>
   <button id="send">Send task</button>
 </div>
 <div class="card" id="wait">
-  <strong>3 · Status</strong>
-  <div><span id="statusPill" class="pill neutral">Idle</span></div>
+  <strong id="statusHeading" tabindex="-1">3 · Status</strong>
+  <div role="status" aria-live="polite" aria-atomic="true"><span id="statusPill" class="pill neutral">Idle</span></div>
   <div id="resultCard" style="display:none;margin-top:12px">
-    <p class="result-summary" id="resultSummary"></p>
+    <p class="result-summary" id="resultSummary" tabindex="-1"></p>
     <div class="links" id="resultLinks"></div>
     <p class="meta" id="resultMeta"></p>
+    <details id="resultDetails"><summary>Details</summary>
+      <div>Session ID: <code id="resultSession"></code><button id="copySession">Copy session ID</button></div>
+      <div>Task ID: <code id="resultTask"></code><button id="copyTask">Copy task ID</button></div>
+    </details>
   </div>
-  <div id="errorCard" style="display:none;margin-top:12px">
-    <p class="err-title" id="errTitle"></p>
+  <div role="alert" aria-atomic="true" id="errorCard" style="display:none;margin-top:12px">
+    <p class="err-title" id="errTitle" tabindex="-1"></p>
     <p class="err-body" id="errBody"></p>
     <button type="button" id="errPrimary" style="display:none"></button>
     <button type="button" id="errSecondary" style="display:none"></button>
     <details id="errDetails"><summary>Details</summary>
-      <div>code: <span id="errCode"></span></div>
-      <div>HTTP: <span id="errHttp"></span></div>
-      <div>correlation: <span id="errCorr"></span></div>
+      <div id="errCodeRow">Error code: <code id="errCode"></code></div>
+      <div id="errHttpRow">HTTP status: <code id="errHttp"></code></div>
+      <div id="errCorrRow">Correlation ID: <code id="errCorr"></code><button id="copyCorr">Copy correlation ID</button></div>
     </details>
   </div>
   <button id="end">End task</button>
@@ -88,90 +93,144 @@ HTML_SHELL = """<!DOCTYPE html>
 const roster = __ROSTER__;
 const offline = __OFFLINE__;
 const COPY = __COPY__;
-const banner = document.getElementById('banner');
-if (offline) { banner.style.display='block'; banner.textContent = 'Offline / fail-closed: ' + offline + '. Send uses dry-run payloads (no DNS invented).'; }
-const rost = document.getElementById('roster');
+const $ = id => document.getElementById(id);
+const banner = $('banner');
+if (offline) { banner.style.display='block'; banner.textContent = "Preview mode. The bridge address isn't set on this Mac."; }
+const rost = $('roster');
 let target = '__DEFAULT__';
-function displayName(key) {
-  const e = roster.find(x => x.key === key);
-  return e ? e.display : key;
+let inflight = false, sending = false, lastSnapshot = {}, lastSent = null, viewKey = '';
+const HELP_URL = 'https://github.com/CaptainPhantasy/benchlink/blob/main/docs/PAIRING_PROOF_RUNBOOK.md';
+function displayName(key) { return (roster.find(x => x.key === key) || {}).display || key; }
+function renderRoster() {
+  rost.innerHTML = '';
+  roster.forEach(e => {
+    const b = document.createElement('button'); b.type = 'button';
+    b.textContent = e.display + (e.default ? ' (default)' : '');
+    b.onclick = () => { target=e.key; $('targetLabel').textContent=e.display; };
+    rost.appendChild(b);
+  });
 }
-roster.forEach(e => {
-  const b = document.createElement('button');
-  b.textContent = e.display + (e.default ? ' (default)' : '');
-  b.onclick = () => { target = e.key; document.getElementById('targetLabel').textContent = e.display; };
-  rost.appendChild(b);
-});
-document.getElementById('targetLabel').textContent = displayName(target);
-
+function updateSendEnabled() { $('send').disabled = sending || inflight || !$('goal').value.trim(); }
+function fallbackError(j) {
+  const t = COPY.errors[j.code] || COPY.errors.internal;
+  const name = displayName(target).split('·')[0].trim();
+  const id = $('deviceId') ? $('deviceId').textContent : '';
+  return {...t, title:t.title.replace('{Name}', name), body:t.body.replace('{Name}', name).replace('{id}', id || 'unknown'), details_code:j.code || 'internal', correlation_id:j.correlation_id};
+}
+async function copyText(button, value) {
+  const label = button.textContent;
+  try { await navigator.clipboard.writeText(value || ''); button.textContent='Copied'; }
+  catch (e) { button.textContent='Copy unavailable'; }
+  setTimeout(() => { button.textContent=label; }, 2000);
+}
+function safeDiagnostics() {
+  const e = (lastSnapshot.presentation || {}).error || {};
+  return JSON.stringify({status:lastSnapshot.wait_status, task_id:lastSnapshot.task_id, session_id:lastSnapshot.session_id,
+    code:e.details_code, correlation_id:e.correlation_id});
+}
+async function post(path, body) {
+  const r=await fetch(path, {method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify(body || {})});
+  return {r, j:await r.json()};
+}
+async function endTask(clear=true) {
+  const {r,j}=await post('/_sidecar/ux/end');
+  if (!r.ok) { showError(j); return false; }
+  show(j);
+  if (clear) { $('goal').value=''; $('hp').checked=false; }
+  updateSendEnabled(); $('goal').focus(); return true;
+}
+async function retryPoll() {
+  try { const {r,j}=await post('/_sidecar/ux/poll'); if (!r.ok) showError(j); else show(j); }
+  catch (e) { showError({code:'offline'}); }
+}
+async function resend(toFloyd=false) {
+  const saved = lastSent || {goal:$('goal').value, target, high_priority:$('hp').checked};
+  if (!await endTask(false)) return;
+  target=toFloyd ? 'floyd' : saved.target; $('targetLabel').textContent=displayName(target);
+  $('goal').value=saved.goal; $('hp').checked=saved.high_priority; renderRoster(); await sendTask();
+}
+const actions = {
+  'Retry': async () => {
+    if (((lastSnapshot.presentation || {}).error || {}).details_code === 'offline') {
+      try { const r=await fetch('/v1/health'); if (!r.ok) showError({code:'offline'}); else banner.style.display='none'; }
+      catch (e) { showError({code:'offline'}); }
+    } else await retryPoll();
+  },
+  'End task': () => endTask(), 'New task': () => endTask(),
+  'Edit task': () => { $('goal').readOnly=false; $('goal').focus(); },
+  'Send again': () => resend(), 'Send to Floyd': () => resend(true),
+  'Copy device ID': button => copyText(button, $('deviceId') ? $('deviceId').textContent : deviceId),
+  'Copy diagnostics': button => copyText(button, safeDiagnostics()),
+  'Details': () => { $('errDetails').open=true; $('errDetails').querySelector('summary').focus(); },
+  'Connection help': () => window.open(HELP_URL, '_blank', 'noopener')
+};
+let deviceId = '';
+fetch('/_sidecar/status').then(r=>r.json()).then(st=>{ deviceId=(st.pairing || {}).device_id || (st.config || {}).BENCHLINK_DEVICE_ID || ''; }).catch(()=>{});
+function wireAction(button, label) {
+  button.style.display = label && actions[label] ? 'inline-block' : 'none';
+  button.textContent = label || '';
+  button.onclick = actions[label] ? () => Promise.resolve(actions[label](button)).catch(()=>showError({code:'offline'})) : null;
+}
+function showError(j) { show({phase:'error', wait_status:'error', error:{code:j.code}, presentation:{status:COPY.status.error, error:(j.presentation || {}).error || fallbackError(j)}}); }
 function show(snap) {
-  const pres = snap.presentation || {};
-  const st = pres.status || COPY.status[snap.wait_status] || COPY.status.idle;
-  const pill = document.getElementById('statusPill');
-  pill.textContent = st.label;
-  pill.className = 'pill ' + (st.tone || 'neutral');
-
-  const rc = document.getElementById('resultCard');
-  const ec = document.getElementById('errorCard');
-  rc.style.display = 'none';
-  ec.style.display = 'none';
-
-  if (pres.result && snap.wait_status === 'result') {
-    rc.style.display = 'block';
-    document.getElementById('resultSummary').textContent = pres.result.summary || '';
-    const links = document.getElementById('resultLinks');
-    links.innerHTML = '';
-    (pres.result.artifact_links || []).forEach(l => {
-      const a = document.createElement('a');
-      a.href = l.url; a.target = '_blank'; a.rel = 'noopener';
-      a.textContent = l.label || l.url; a.title = l.url;
+  lastSnapshot=snap;
+  const pres=snap.presentation || {}, st=pres.status || COPY.status[snap.wait_status] || COPY.status.idle;
+  const key=JSON.stringify([snap.phase,snap.wait_status,snap.task_id,pres.error]);
+  const changed=key!==viewKey; viewKey=key;
+  const pill=$('statusPill'); pill.textContent=st.label; pill.className='pill '+(st.tone || 'neutral');
+  inflight=snap.phase==='wait'; updateSendEnabled();
+  const rc=$('resultCard'), ec=$('errorCard');
+  rc.style.display=pres.result && snap.wait_status==='result' ? 'block' : 'none';
+  ec.style.display=pres.error || snap.error ? 'block' : 'none';
+  if (pres.result && snap.wait_status==='result') {
+    $('resultSummary').textContent=pres.result.summary || '';
+    const links=$('resultLinks'); links.innerHTML='';
+    (pres.result.artifact_links || []).forEach(l=>{
+      if (!(l.url || '').startsWith('https://') && !(l.url || '').startsWith('http://')) return;
+      const a=document.createElement('a'); a.href=l.url; a.target='_blank'; a.rel='noopener';
+      const icon=document.createElement('span'); icon.setAttribute('aria-hidden','true'); icon.innerHTML='<svg class="lucide lucide-link-2" xmlns="http://www.w3.org/2000/svg" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="m9 15 6-6"/><path d="m11 7 1.5-1.5a5 5 0 0 1 7 7L18 14"/><path d="m13 17-1.5 1.5a5 5 0 0 1-7-7L6 10"/></svg> '; a.appendChild(icon); a.appendChild(document.createTextNode(l.label || l.url)); a.title=l.url; a.setAttribute('aria-label', l.url);
       links.appendChild(a);
     });
-    if (!pres.result.has_links) {
-      const note = document.createElement('p');
-      note.className = 'muted';
-      note.textContent = pres.result.empty_links_note || 'No links returned';
-      links.appendChild(note);
-    }
-    document.getElementById('resultMeta').textContent = pres.result.meta || '';
+    if (!pres.result.has_links) { const p=document.createElement('p'); p.className='muted'; p.textContent='No links returned'; links.appendChild(p); }
+    $('resultMeta').textContent=pres.result.meta || '';
+    $('resultSession').textContent=pres.result.session_id || snap.session_id || '';
+    $('resultTask').textContent=pres.result.task_id || snap.task_id || '';
+    if (changed) $('resultSummary').focus();
   }
-
-  if (pres.error || snap.error) {
-    const err = pres.error || {};
-    ec.style.display = 'block';
-    document.getElementById('errTitle').textContent = err.title || 'Something went wrong on the bridge';
-    document.getElementById('errBody').textContent = err.body || '';
-    document.getElementById('errCode').textContent = err.details_code || (snap.error && snap.error.code) || '';
-    document.getElementById('errHttp').textContent = (err.http != null ? err.http : '');
-    document.getElementById('errCorr').textContent = err.correlation_id || '';
-    const p = document.getElementById('errPrimary');
-    const s = document.getElementById('errSecondary');
-    if (err.primary) { p.style.display = 'inline-block'; p.textContent = err.primary; } else { p.style.display = 'none'; }
-    if (err.secondary) { s.style.display = 'inline-block'; s.textContent = err.secondary; } else { s.style.display = 'none'; }
+  if ((pres.error || snap.error) && changed) {
+    const err=pres.error || fallbackError(snap.error || {});
+    $('errTitle').textContent=err.title; $('errBody').textContent=err.body;
+    for (const [id,value] of [['errCode',err.details_code],['errHttp',err.http],['errCorr',err.correlation_id]]) {
+      $(id).textContent=value == null ? '' : value; $(id+'Row').hidden=value == null || value==='';
+    }
+    wireAction($('errPrimary'),err.primary); wireAction($('errSecondary'),err.secondary);
+    $('errTitle').focus();
   }
 }
-
-document.getElementById('send').onclick = async () => {
-  const goal = document.getElementById('goal').value.trim();
-  if (!goal) { alert('Compose a Staff task first'); return; }
-  const r = await fetch('/_sidecar/ux/run', {method:'POST', headers:{'Content-Type':'application/json'},
-    body: JSON.stringify({target, goal, high_priority: document.getElementById('hp').checked})});
-  const j = await r.json();
-  if (!j.snapshot) { show({wait_status:'error', error:j, presentation:{status:COPY.status.error, error:{title:'Task couldn\\'t be sent', body:j.message || '', details_code:j.code || 'validation', primary:'Edit task', secondary:'Details'}}}); return; }
-  let snap = j.snapshot;
-  show(snap);
-  while (snap.phase === 'wait') {
-    await new Promise(res => setTimeout(res, 2000));
-    snap = await (await fetch('/_sidecar/ux/poll', {method:'POST'})).json();
-    show(snap);
-  }
-};
-document.getElementById('end').onclick = async () => {
-  const snap = await (await fetch('/_sidecar/ux/end', {method:'POST'})).json();
-  show(snap);
-  document.getElementById('goal').value = '';
-  document.getElementById('hp').checked = false;
-};
+async function sendTask() {
+  const goal=$('goal').value.trim(); if (!goal || sending || inflight) return;
+  sending=true; updateSendEnabled(); $('send').textContent='Sending';
+  lastSent={target,goal,high_priority:$('hp').checked};
+  try {
+    const {r,j}=await post('/_sidecar/ux/run',lastSent);
+    if (!r.ok || !j.snapshot) { showError(j); return; }
+    let snap=j.snapshot; show(snap); if (snap.phase==='wait') $('statusHeading').focus();
+    while (snap.phase==='wait') {
+      await new Promise(res=>setTimeout(res,2000));
+      if (!inflight) break;
+      const out=await post('/_sidecar/ux/poll'); if (!out.r.ok) { showError(out.j); break; }
+      snap=out.j; show(snap);
+    }
+  } catch (e) { showError({code:'offline'}); }
+  finally { sending=false; $('send').textContent='Send task'; updateSendEnabled(); }
+}
+$('send').onclick=sendTask;
+$('end').onclick=()=>endTask().catch(()=>showError({code:'offline'}));
+$('goal').addEventListener('input',updateSendEnabled);
+$('copySession').onclick=()=>copyText($('copySession'),$('resultSession').textContent);
+$('copyTask').onclick=()=>copyText($('copyTask'),$('resultTask').textContent);
+$('copyCorr').onclick=()=>copyText($('copyCorr'),$('errCorr').textContent);
+$('targetLabel').textContent=displayName(target); renderRoster(); updateSendEnabled();
 </script></body></html>
 """
 

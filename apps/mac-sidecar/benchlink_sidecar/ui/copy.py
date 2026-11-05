@@ -6,6 +6,8 @@ daemon developer messages, tokens, or key paths as the headline.
 from __future__ import annotations
 
 from dataclasses import asdict, dataclass
+from datetime import datetime
+from zoneinfo import ZoneInfo
 from typing import Any
 
 
@@ -181,10 +183,20 @@ def result_card(result: dict | None, *, target_name: str | None = None) -> dict[
             links.append({"url": url, "label": str(item.get("label") or _truncate_middle(url, 48))})
     task_id = result.get("task_id") or ""
     name = _first_name(target_name)
+    finished = ""
+    try:
+        stamp = datetime.fromisoformat(result.get("created_at", "").replace("Z", "+00:00"))
+        if stamp.tzinfo:
+            finished = stamp.astimezone(ZoneInfo("America/Indiana/Indianapolis")).strftime("%-I:%M %p")
+    except (ValueError, TypeError):
+        pass
+    meta = name + (f" · finished {finished} ET" if finished else "")
+    if task_id:
+        meta += f" · Task ID {task_id}"
     return {
         "summary": summary,
         "artifact_links": links,
-        "meta": f"{name} · Task ID {task_id}".strip(" ·") if task_id else name,
+        "meta": meta,
         "task_id": task_id,
         "session_id": result.get("session_id"),
         "has_links": bool(links),
