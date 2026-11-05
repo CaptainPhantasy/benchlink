@@ -21,6 +21,7 @@ from . import CONTRACT_VERSION, __version__
 from .client import BridgeClient
 from .config import ConfigError, SidecarConfig, describe
 from .ux import DEFAULT_TARGET, ROSTER, BridgeControlShell
+from .request_guard import request_denial
 
 
 def error_envelope(code: str, message: str, retryable: bool) -> dict:
@@ -134,7 +135,20 @@ def make_handler(cfg: SidecarConfig):
                 return {}
             return json.loads(self.rfile.read(n) or b"{}")
 
+        def _allow_request(self, *, mutation=False):
+            denial = request_denial(self.headers, self.server.server_address[1], mutation=mutation)
+            if not self.path.startswith("/") or self.path.startswith("//"):
+                denial = (403, "Only local origin-form requests are allowed.")
+            if denial:
+                status, reason = denial
+                self.close_connection = True
+                self._json(status, error_envelope("auth.denied" if status == 403 else "validation", reason, False))
+                return False
+            return True
+
         def do_GET(self):  # noqa: N802
+            if not self._allow_request():
+                return
             path = self.path.split("?", 1)[0]
             if path in {"/", "/index.html"}:
                 shell = BridgeControlShell(cfg)
@@ -162,6 +176,8 @@ def make_handler(cfg: SidecarConfig):
             return self._json(404, error_envelope("validation", f"no route {path}", False))
 
         def do_POST(self):  # noqa: N802
+            if not self._allow_request(mutation=True):
+                return
             path = self.path.split("?", 1)[0]
             if path == "/_sidecar/ux/run":
                 try:
