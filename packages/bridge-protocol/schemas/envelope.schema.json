@@ -1,0 +1,52 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://floydslabs.local/bridge/v1/envelope.schema.json",
+  "title": "BridgeEnvelopeV1",
+  "oneOf": [
+    {
+      "$ref": "health_ping.schema.json"
+    },
+    {
+      "$ref": "health_pong.schema.json"
+    },
+    {
+      "$ref": "auth_pair_request.schema.json"
+    },
+    {
+      "$ref": "auth_pair_challenge.schema.json"
+    },
+    {
+      "$ref": "auth_pair_complete.schema.json"
+    },
+    {
+      "$ref": "auth_session_token.schema.json"
+    },
+    {
+      "$ref": "session_create.schema.json"
+    },
+    {
+      "$ref": "session_created.schema.json"
+    },
+    {
+      "$ref": "session_attach.schema.json"
+    },
+    {
+      "$ref": "session_message.schema.json"
+    },
+    {
+      "$ref": "session_event.schema.json"
+    },
+    {
+      "$ref": "session_close.schema.json"
+    },
+    {
+      "$ref": "task_create.schema.json"
+    },
+    {
+      "$ref": "task_result.schema.json"
+    },
+    {
+      "$ref": "error.schema.json"
+    }
+  ]
+}

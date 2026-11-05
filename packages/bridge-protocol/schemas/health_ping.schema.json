@@ -1,0 +1,19 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://floydslabs.local/bridge/v1/health_ping.schema.json",
+  "title": "health.ping",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "v",
+    "type"
+  ],
+  "properties": {
+    "v": {
+      "const": "1"
+    },
+    "type": {
+      "const": "health.ping"
+    }
+  }
+}
