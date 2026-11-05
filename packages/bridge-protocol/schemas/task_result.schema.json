@@ -1,0 +1,65 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://floydslabs.local/bridge/v1/task_result.schema.json",
+  "title": "task.result",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "v",
+    "type",
+    "session_id",
+    "task_id",
+    "status",
+    "summary",
+    "artifact_links",
+    "created_at",
+    "agent_id"
+  ],
+  "properties": {
+    "v": {
+      "const": "1"
+    },
+    "type": {
+      "const": "task.result"
+    },
+    "session_id": {
+      "$ref": "common.schema.json#/$defs/uuidLike"
+    },
+    "task_id": {
+      "$ref": "common.schema.json#/$defs/uuidLike"
+    },
+    "status": {
+      "enum": [
+        "accepted",
+        "running",
+        "succeeded",
+        "failed"
+      ]
+    },
+    "summary": {
+      "type": "string"
+    },
+    "artifact_links": {
+      "type": "array",
+      "items": {
+        "$ref": "common.schema.json#/$defs/artifactLink"
+      }
+    },
+    "error_class": {
+      "oneOf": [
+        {
+          "type": "null"
+        },
+        {
+          "$ref": "common.schema.json#/$defs/errorClass"
+        }
+      ]
+    },
+    "agent_id": {
+      "type": "string"
+    },
+    "created_at": {
+      "$ref": "common.schema.json#/$defs/iso8601"
+    }
+  }
+}
