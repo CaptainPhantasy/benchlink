@@ -77,10 +77,11 @@ Every in/out message is validated against the frozen schemas. All timestamps are
 | B1 | Bad sig, replayed challenge, unknown device, scope, Tailscale identity, body/header mismatch, staff webhook rejects the sender key | `auth.denied` (403) | sidecar error |
 | B2 | Bridge URL unset or placeholder | fail closed (dry-run banner / CLI exit 3) | sidecar |
 | B2 | Bridge down | `offline` | sidecar |
-| B2 | Target webhook URL/sender key unset, webhook unreachable/5xx, results folder unset | `offline` (503, retryable) | task create + `task.result.error_class` |
+| B2 | Target webhook URL/sender key unset, webhook unreachable/501/505, results folder unset | `offline` (503, retryable) | task create + `task.result.error_class` |
 | B3 | Unknown target / task target ≠ session target / webhook 404 | `routing` (422) | session/task create |
 | B4 | No final result by `BENCHLINK_TASK_TIMEOUT_S` | `task.result{failed, error_class: timeout}` | GET task / bridge status |
 | B4 | Webhook dispatch exceeds `BENCHLINK_WEBHOOK_TIMEOUT_S` | `timeout` (504) | task create |
+| B4 | Delivery outcome unknown (response timeout, webhook 408/504, other webhook 5xx, connection dropped after send) | create returns `timeout` (504) or `offline` (503); the task stays `accepted` and GET keeps checking for the bot's result until `BENCHLINK_TASK_TIMEOUT_S`. It is never redispatched | task create, then GET task |
 
 ## 4. Result inbound: Drive-folder fallback (GM decision; default)
 
