@@ -62,6 +62,7 @@ def main():
             if path == '/': return r.continue_()
             calls.append((path,r.request.post_data))
             if path=='/_sidecar/status': return r.fulfill(json=state)
+            if path=='/_sidecar/ux': return r.fulfill(json={'phase':'pick','wait_status':'idle','task_in_flight':False})
             if path=='/_sidecar/pair':
                 if mode['pair']=='success':
                     state['pairing']={'state':'paired','label':'Paired','device_id':'mac-i1-fixture'}

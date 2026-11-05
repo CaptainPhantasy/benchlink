@@ -21,7 +21,8 @@ from datetime import datetime, timezone
 from enum import Enum
 from typing import Callable
 
-from .client import AuthNotPaired, BridgeClient, PreparedRequest
+from .task_result import is_task_result
+from .client import AuthNotPaired, BridgeClient, PreparedRequest, RequestTimeout, UnacknowledgedDispatch, _is_frozen_error
 from .ui.copy import error_card, result_card, status_token
 from .config import ConfigError, SidecarConfig, ui_config
 
@@ -113,7 +114,10 @@ class BridgeControlShell:
     high_priority: bool = False  # O3 default off
     session_id: str | None = None
     task_id: str | None = None
+    _submission_in_progress: bool = False
+    _task_attempted: bool = False  # ownership survives even an unexpected reply exception
     task_accepted: bool = False  # local lifecycle marker, never part of the wire contract
+    submission_uncertain: bool = False  # request timed out before task.create acknowledgement
     wait_status: WaitStatus = WaitStatus.IDLE
     result: dict | None = None
     error: dict | None = None
@@ -159,7 +163,7 @@ class BridgeControlShell:
 
     def pick(self, target_key: str = DEFAULT_TARGET) -> None:
         """Phase 1: Pick target. O1: only allowed from PICK / DONE / ERROR (not mid-WAIT)."""
-        if self.phase == Phase.WAIT and O1_NO_MID_TASK_HANDOFF:
+        if self.has_unfinished_task() and O1_NO_MID_TASK_HANDOFF:
             raise TaskInFlight("O1: mid-task handoff forbidden; End task first, then re-pick")
         keys = {e.key for e in ROSTER}
         if target_key not in keys:
@@ -173,6 +177,8 @@ class BridgeControlShell:
         self.session_id = None
         self.task_id = None
         self.task_accepted = False
+        self._task_attempted = False
+        self.submission_uncertain = False
         self.result = None
         self.error = None
         self.wait_status = WaitStatus.IDLE
@@ -183,6 +189,8 @@ class BridgeControlShell:
 
     def compose(self, goal: str, high_priority: bool = False) -> None:
         """Phase 2a: set Staff task text (A5 typing in Bridge Control)."""
+        if self.has_unfinished_task():
+            raise TaskInFlight("O1: task acknowledgement/result is pending; End task first")
         if self.phase not in {Phase.COMPOSE, Phase.PICK}:
             # Allow re-compose only before send; after send must End first (O1)
             if self.phase == Phase.WAIT and O1_NO_MID_TASK_HANDOFF:
@@ -199,6 +207,8 @@ class BridgeControlShell:
 
     def send(self) -> dict:
         """Phase 2b: Send = session.create then task.create. Dry-run when URL unset."""
+        if self.has_unfinished_task():
+            raise TaskInFlight("The original task has not confirmed completion; Retry checks that task")
         if self.phase != Phase.COMPOSE or not self.goal:
             raise RuntimeError("Compose a non-empty Staff task before Send")
         priority = "high" if self.high_priority else "normal"
@@ -225,6 +235,8 @@ class BridgeControlShell:
         }
 
         if not dry:
+            submitting_task = False
+            self._submission_in_progress = True
             try:
                 sc_live = self.client.build_session_create(
                     self.target_key, {"origin": "bridge-control"}, dry_run=False)
@@ -237,21 +249,41 @@ class BridgeControlShell:
                     self.session_id, self.task_id, self.goal,
                     target_agent=self.target_key, priority=priority,
                     reply_destination=reply, dry_run=False)
+                submitting_task = True
+                self._task_attempted = True
                 st2, body2 = self.client.send(tc_live)
                 payloads["task_response"] = {"status": st2, "body": _redact(body2)}
-                if st2 >= 400 or not isinstance(body2, dict) or body2.get("type") != "task.result":
+                if st2 >= 400 and _is_frozen_error(body2):
+                    # Even a complete error cannot prove whether task.create took
+                    # effect. Require a matching terminal GET before any reset.
+                    self.submission_uncertain = True
                     return self._fail_send(st2, body2, payloads)
-                self.task_id = body2["task_id"]
-                self.task_accepted = True
+                if not 200 <= st2 < 300 or not self._matches_original_result(body2):
+                    raise UnacknowledgedDispatch(st2, "offline")
+                self._accept_task_result(body2, st2)
             except AuthNotPaired as e:
                 return self._fail_send(401, {"code": "auth.unpaired", "message": str(e)}, payloads)
             except ConfigError as e:
                 return self._fail_send(503, {"code": "offline", "message": str(e)}, payloads)
+            except UnacknowledgedDispatch as e:
+                self.submission_uncertain = submitting_task
+                return self._fail_send(e.http_status, {"code": e.code, "message": str(e)}, payloads)
+            except RequestTimeout as e:
+                self.submission_uncertain = submitting_task
+                return self._fail_send(504, {"code": "timeout", "message": str(e)}, payloads)
             except OSError as e:
+                self.submission_uncertain = submitting_task
                 return self._fail_send(502, {"code": "offline", "message": f"bridge unreachable: {e}"}, payloads)
+            except Exception:
+                self.submission_uncertain = submitting_task
+                return self._fail_send(502 if submitting_task else 500,
+                                       {"code": "internal", "message": "Bridge reply unavailable"}, payloads)
+            finally:
+                self._submission_in_progress = False
 
-        self.wait_status = WaitStatus.QUEUED
-        self.phase = Phase.WAIT
+        if dry:
+            self.wait_status = WaitStatus.QUEUED
+            self.phase = Phase.WAIT
         self.transcript.add("send", session_id=self.session_id, task_id=self.task_id,
                             mode=payloads["mode"])
         return payloads
@@ -282,42 +314,68 @@ class BridgeControlShell:
             self.phase = Phase.ERROR
             self.error = {"code": "auth.unpaired", "message": str(e)}
             return {"wait_status": self.wait_status.value, "error": self.error}
-        except (ConfigError, OSError) as e:
+        except RequestTimeout as e:
+            self.wait_status = WaitStatus.ERROR
+            self.phase = Phase.ERROR
+            self.error = {"code": "timeout", "message": str(e), "http": 504}
+            return {"wait_status": self.wait_status.value, "error": self.error}
+        except (ConfigError, OSError, ValueError) as e:
             self.wait_status = WaitStatus.ERROR
             self.phase = Phase.ERROR
             self.error = {"code": "offline", "message": str(e)}
             return {"wait_status": self.wait_status.value, "error": self.error}
-        # All live errors fail closed, even malformed bodies or a spurious result.
-        if st >= 400 or not isinstance(body, dict) or body.get("type") != "task.result":
-            code = body.get("code", "internal") if isinstance(body, dict) else "internal"
-            if st == 501:
-                code = "internal"
-            card = error_card(code)
+        except Exception:
             self.wait_status = WaitStatus.ERROR
             self.phase = Phase.ERROR
-            self.error = {"code": card["details_code"], "message": card["body"],
-                          "http": st, "correlation_id": body.get("correlation_id") if isinstance(body, dict) else None}
+            self.error = {"code": "internal", "message": "Bridge reply unavailable"}
+            return {"wait_status": self.wait_status.value, "error": self.error}
+        if not 200 <= st < 300 or not self._matches_original_result(body):
+            # No error/status/presentation code can release ownership of an
+            # uncertain or known-nonterminal task. Only a matching valid terminal can.
+            code = body.get("code", "internal") if isinstance(body, dict) else "internal"
+            card = error_card(code if isinstance(code, str) else "internal")
+            self.wait_status = WaitStatus.ERROR
+            self.phase = Phase.ERROR
+            self.error = {"code": card["details_code"], "message": card["body"], "http": st,
+                          "correlation_id": body.get("correlation_id") if isinstance(body, dict) else None}
             return {"wait_status": self.wait_status.value, "http": st, "error": self.error}
-        if isinstance(body, dict) and body.get("type") == "task.result":
-            status = body.get("status")
-            if status in {"accepted"}:
-                self.wait_status = WaitStatus.QUEUED
-            elif status == "running":
-                self.wait_status = WaitStatus.RUNNING
-            elif status == "succeeded":
-                self.wait_status = WaitStatus.RESULT
-                self.result = body
-                self.phase = Phase.DONE
-            elif status == "failed":
-                self.wait_status = WaitStatus.ERROR
-                self.result = body
-                self.error = {"code": body.get("error_class") or "internal",
-                              "message": body.get("summary"), "http": st,
-                              "correlation_id": None}
-                self.phase = Phase.ERROR
-            else:
-                self.wait_status = WaitStatus.RUNNING
-            return {"wait_status": self.wait_status.value, "http": st, "body": body}
+        self._accept_task_result(body, st)
+        return {"wait_status": self.wait_status.value, "http": st, "body": body}
+
+    def _matches_original_result(self, body) -> bool:
+        return bool(is_task_result(body) and body["task_id"] == self.task_id
+                    and body["session_id"] == self.session_id)
+
+    def _confirmed_terminal(self) -> bool:
+        return bool(self._matches_original_result(self.result)
+                    and self.result["status"] in {"failed", "succeeded"})
+
+    def has_unfinished_task(self) -> bool:
+        """One invariant for every mutation and local UI snapshot, not an error-code policy."""
+        return bool(self._submission_in_progress or self.submission_uncertain
+                    or self.phase == Phase.WAIT
+                    or ((self._task_attempted or self.task_accepted) and not self._confirmed_terminal()))
+
+    def _accept_task_result(self, body, http_status) -> None:
+        # All callers validate both schema and original identity before entry.
+        assert self._matches_original_result(body)
+        self.task_accepted = True
+        status = body["status"]
+        self.error = None
+        if status in {"accepted", "running"}:
+            self.phase = Phase.WAIT
+            self.wait_status = WaitStatus.QUEUED if status == "accepted" else WaitStatus.RUNNING
+            self.result = None
+            # A recovered nonterminal ACK does not release prior uncertainty.
+            return
+        self.submission_uncertain = False
+        self.result = body
+        if status == "succeeded":
+            self.wait_status, self.phase = WaitStatus.RESULT, Phase.DONE
+        else:
+            self.wait_status, self.phase = WaitStatus.ERROR, Phase.ERROR
+            self.error = {"code": body.get("error_class") or "internal", "message": body["summary"],
+                          "http": http_status, "correlation_id": None}
 
     def _simulate_wait_tick(self) -> dict:
         """Offline demo: local status only — does NOT invent DNS or call upstream."""
@@ -361,6 +419,8 @@ class BridgeControlShell:
 
     def end_task(self) -> None:
         """O1: end session → back to Pick. Clears session-only transcript (O4)."""
+        if self.has_unfinished_task():
+            raise TaskInFlight("Completion is not confirmed; End is not a cancellation acknowledgement")
         if self.session_id and not self.dry_run_mode and self.client:
             try:
                 req = self.client.build_session_close(self.session_id, "user_done")
@@ -371,6 +431,8 @@ class BridgeControlShell:
         self.session_id = None
         self.task_id = None
         self.task_accepted = False
+        self._task_attempted = False
+        self.submission_uncertain = False
         self.goal = ""
         self.result = None
         self.error = None
@@ -380,11 +442,9 @@ class BridgeControlShell:
         self.last_task_req = None
 
     def can_resume_interrupted_wait(self) -> bool:
-        """Only a known accepted task interrupted by transport may resume."""
-        return bool(self.phase == Phase.ERROR and self.task_accepted
-                    and self.session_id and self.task_id
-                    and (self.error or {}).get("code") == "offline"
-                    and (self.result or {}).get("status") not in {"failed", "succeeded"})
+        """Only GET a known/possibly accepted task after a transport interruption."""
+        return bool(self.has_unfinished_task() and self.session_id and self.task_id
+                    and self.phase != Phase.WAIT and not self._submission_in_progress)
 
     def resume_interrupted_wait(self) -> None:
         """GET the existing task. Never End, session.create or task.create here."""
@@ -429,6 +489,9 @@ class BridgeControlShell:
                 http=self.error.get("http"),
                 preview=preview,
             )
+        if self.can_resume_interrupted_wait():
+            presentation["error"].update(body="Completion is not confirmed. Retry checks the original task; Send stays locked.",
+                                         primary="Retry", secondary="Open connection")
         return {
             "phase": self.phase.value,
             "target": self.target_key,
@@ -437,6 +500,8 @@ class BridgeControlShell:
             "session_id": self.session_id,
             "task_id": self.task_id,
             "task_accepted": self.task_accepted,
+            "submission_uncertain": self.submission_uncertain,
+            "task_in_flight": self.has_unfinished_task(),
             "wait_status": self.wait_status.value,
             "dry_run_mode": self.dry_run_mode,
             "offline_banner": self.offline_banner,
@@ -451,7 +516,7 @@ class BridgeControlShell:
     def start_and_wait(self, goal: str, target_key: str = DEFAULT_TARGET,
                        high_priority: bool = False, max_ticks: int | None = None) -> dict:
         """Pick → Compose → Send → Wait (bounded); leaves state for later polls / End."""
-        if self.phase == Phase.WAIT:
+        if self.has_unfinished_task():
             raise TaskInFlight("O1: a task is in flight; End task first")
         self.pick(target_key)
         self.compose(goal, high_priority=high_priority)

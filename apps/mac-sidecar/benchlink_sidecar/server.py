@@ -82,7 +82,7 @@ HTML_SHELL = """<!DOCTYPE html>
 </div>
 <div class="card" id="pick">
   <strong>1 · Pick target</strong>
-  <div id="roster" role="radiogroup" aria-label="Staff target"></div><p id="rosterLock" class="muted" hidden>End the current task to change target.</p>
+  <div id="roster" role="radiogroup" aria-label="Staff target"></div><p id="rosterLock" class="muted" hidden>Wait for confirmed completion to change target.</p>
 </div>
 <div class="card" id="compose">
   <strong id="composeHeading">Compose task for Floyd</strong><span id="targetLabel" hidden>Floyd</span>
@@ -127,12 +127,12 @@ const banner = $('banner');
 
 const rost = $('roster');
 let target = '__DEFAULT__';
-let recovering = false, polling = false, pollRequest = false, acceptedSnapshot = null;
+let recovering = false, polling = false, pollRequest = false, acceptedSnapshot = null, taskStateLoaded = false, taskRequestUncertain = false;
 let inflight = false, sending = false, lastSnapshot = {}, lastSent = null, viewKey = '';
 const HELP_URL = 'https://github.com/CaptainPhantasy/benchlink/blob/main/docs/PAIRING_PROOF_RUNBOOK.md';
 function displayName(key) { return (roster.find(x => x.key === key) || {}).display || key; }
 function selectTarget(key, focus=false) {
-  if (inflight || sending) return;
+  if (inflight || sending || hasPendingTask()) return;
   target=key; $('targetLabel').textContent=displayName(target);
   $('composeHeading').textContent='Compose task for '+displayName(target).split('·')[0].trim();
   renderRoster();
@@ -146,7 +146,7 @@ function renderRoster() {
   roster.forEach((e,i)=>{
     const b=document.createElement('button'); b.type='button'; b.className='opt'+(e.key===target ? ' selected' : '');
     b.setAttribute('role','radio'); b.setAttribute('aria-checked',e.key===target ? 'true' : 'false');
-    b.tabIndex=e.key===target ? 0 : -1; b.disabled=inflight || sending;
+    b.tabIndex=e.key===target ? 0 : -1; b.disabled=inflight || sending || hasPendingTask();
     const check=document.createElement('span'); check.setAttribute('aria-hidden','true'); check.innerHTML=e.key===target ? '<svg class="lucide lucide-check" xmlns="http://www.w3.org/2000/svg" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true"><path d="m20 6-11 11-5-5"/></svg> ' : ''; b.appendChild(check);
     b.appendChild(document.createTextNode(e.display+(e.default ? ' · Default' : e.group==='canary' ? ' · Canary' : '')));
     b.onclick=()=>selectTarget(e.key,true);
@@ -162,15 +162,16 @@ function renderRoster() {
     if (e.group==='leads') leads.appendChild(b); else rost.appendChild(b);
   });
   rost.appendChild(leadCaption); rost.appendChild(leads);
-  $('rosterLock').hidden=!inflight;
+  $('rosterLock').hidden=!(inflight || hasPendingTask());
 }
 function updateSendEnabled() {
   const btn=$('send'); let hint='';
   if (previewMode) hint="Preview mode. The bridge address isn't set on this Mac, so tasks can't be sent.";
+  else if (!taskStateLoaded) hint='Loading current task status';
   else if (recovering) hint='Recovering task';
   else if (isInterruptedTask()) hint='Reconnect to resume the current task.';
   else if (sending) hint='Sending';
-  else if (inflight) hint='A task is in flight. End task first, then pick a target and send again.';
+  else if (inflight || hasPendingTask()) hint='Wait for confirmed completion before starting another task.';
   else if (connectionKey==='disconnected' || connectionKey==='connecting') hint='Reconnect to send.';
   else if (pairingBusy) hint=repairing ? 'Re-pairing…' : 'Pairing…';
   else if (pairingState==='not_allowed') hint="This Mac isn't allowed. Ask Larry or Claire to enroll it.";
@@ -178,7 +179,7 @@ function updateSendEnabled() {
   else if (pairingState==='not_paired') hint='Pair this Mac to send tasks.';
   else if (pairingState==='failed') hint='Pairing failed. Re-pair to send.';
   btn.disabled=!!hint || !$('goal').value.trim(); $('sendHint').textContent=hint;
-  $('goal').readOnly=inflight; $('hp').disabled=inflight;
+  $('goal').readOnly=inflight || hasPendingTask(); $('hp').disabled=inflight || hasPendingTask();
 }
 function fallbackError(j) {
   const t = COPY.errors[j.code] || COPY.errors.internal;
@@ -295,20 +296,26 @@ function wireAction(button, label) {
   button.textContent = label || '';
   button.onclick = actions[label] ? () => Promise.resolve(actions[label](button)).catch(()=>showError({code:'offline'})) : null;
 }
+function hasPendingTask() {
+  return taskRequestUncertain || lastSnapshot.task_in_flight===true || acceptedSnapshot!==null;
+}
 function isInterruptedTask() {
-  return !!(acceptedSnapshot && lastSnapshot.phase==='error' &&
-    (lastSnapshot.error || {}).code==='offline' &&
-    !['failed','succeeded'].includes((lastSnapshot.result || {}).status));
+  return hasPendingTask() && lastSnapshot.phase!=='wait';
 }
 function showError(j) {
-  const keep=j.code==='offline' && acceptedSnapshot ? acceptedSnapshot : {};
-  show({...keep, phase:'error', wait_status:'error', error:{code:j.code},
-    presentation:{status:COPY.status.error, error:(j.presentation || {}).error || fallbackError(j)}});
+  // Local transport/presentation errors never erase authoritative task ownership.
+  const pending=hasPendingTask();
+  const keep=acceptedSnapshot || (lastSnapshot.task_in_flight ? lastSnapshot : {});
+  let card=(j.presentation || {}).error || fallbackError(j);
+  if (pending) card={...card, primary:'Retry', secondary:'Open connection',
+    body:'Completion is not confirmed. Retry checks the original task; Send stays locked.'};
+  show({...keep, ...(pending ? {task_in_flight:true} : {}), phase:'error', wait_status:'error', error:{code:j.code},
+    presentation:{status:COPY.status.error, error:card}});
 }
 function show(snap) {
   // Retain accepted IDs across a failed local fetch as well as a daemon outage.
-  if (snap.task_id && snap.session_id && (snap.task_accepted || snap.phase==='wait')) acceptedSnapshot={...snap};
-  if (snap.phase==='pick' || snap.phase==='done' || (snap.result || {}).status==='failed') acceptedSnapshot=null;
+  if (snap.task_in_flight===true) acceptedSnapshot={...snap};
+  else if (snap.task_in_flight===false) { acceptedSnapshot=null; taskRequestUncertain=false; }
   lastSnapshot=snap;
   const pres=snap.presentation || {}, st=pres.status || COPY.status[snap.wait_status] || COPY.status.idle;
   const key=JSON.stringify([snap.phase,snap.wait_status,snap.task_id,pres.error]);
@@ -344,11 +351,12 @@ function show(snap) {
   }
 }
 async function sendTask() {
-  const goal=$('goal').value.trim(); if (!goal || isInterruptedTask() || recovering || sending || inflight || previewMode || pairingBusy || connectionKey!=='connected') return;
+  const goal=$('goal').value.trim(); if (!goal || !taskStateLoaded || hasPendingTask() || recovering || sending || inflight || previewMode || pairingBusy || connectionKey!=='connected') return;
   if (pairingState==='expired' && !autoRepairAttempted) { if (!await pairDevice(true,true)) return; }
   if (pairingState!=='paired') return;
   $('inflightNotice').style.display='none'; sending=true; updateSendEnabled(); $('send').textContent='Sending';
   lastSent={target,goal,high_priority:$('hp').checked};
+  taskRequestUncertain=true;  // local POST may succeed even if its browser reply is lost
   try {
     const {r,j}=await post('/_sidecar/ux/run',lastSent);
     sending=false; $('send').textContent='Send task';
@@ -470,14 +478,24 @@ async function pairDevice(repair=false, automatic=false) {
 actions['Pair this Mac']=()=>pairDevice(false);
 actions['Re-pair']=()=>pairDevice(true);
 actions['Open connection']=openConnection;
-actions['Retry']=()=>((lastSnapshot.presentation || {}).error || {}).details_code==='offline' ? retryConnectionTask() : retryTask();
+actions['Retry']=()=>hasPendingTask() ? retryPoll() : (((lastSnapshot.presentation || {}).error || {}).details_code==='offline' ? retryConnectionTask() : retryTask());
 $('connPill').onclick=openConnection;
 $('s4Close').onclick=()=>{ $('s4').style.display='none'; $('connPill').focus(); };
 $('s4Retry').onclick=retryConnectionTask; $('s4Repair').onclick=()=>pairDevice(true);
 $('pairBtn').onclick=()=>pairDevice(pairingState!=='not_paired');
 $('copyDevice').onclick=()=>copyText($('copyDevice'),$('deviceId').textContent);
 $('copyDiagnostics').onclick=()=>copyText($('copyDiagnostics'),JSON.stringify(lastStatus));
-refreshStatus(); setInterval(refreshStatus,30000);
+async function loadCurrentTask() {
+  try {
+    const response=await fetch('/_sidecar/ux');
+    if (!response.ok) throw new Error('task status');
+    const snap=await response.json();
+    if (typeof snap.task_in_flight!=='boolean') throw new Error('task ownership missing');
+    show(snap); taskStateLoaded=true;
+  } catch (e) { showError({code:'offline'}); }
+  updateSendEnabled();
+}
+loadCurrentTask(); refreshStatus(); setInterval(refreshStatus,30000);
 $('targetLabel').textContent=displayName(target); renderRoster(); updateSendEnabled();
 </script></body></html>
 """
@@ -588,7 +606,9 @@ def make_handler(cfg: SidecarConfig):
                                         "config": ui_config(cfg),
                                         "roster_keys": [e.key for e in ROSTER]})
             if path == "/_sidecar/ux":
-                return self._json(200, BridgeControlShell(cfg).snapshot())
+                with run_lock:
+                    body = json.dumps(live["shell"].snapshot()).encode()
+                return self._json(200, body)
             return self._json(404, error_envelope("validation", f"no route {path}", False))
 
         def _task_response(self, path: str):
@@ -609,7 +629,7 @@ def make_handler(cfg: SidecarConfig):
                         }
                         return (503, env)
                     # Ruling 1 / O1: refuse Send while Queued or Running; never silent restart.
-                    if shell.phase.value == "wait" or shell.can_resume_interrupted_wait():
+                    if shell.has_unfinished_task():
                         env = error_envelope("validation", TASK_IN_FLIGHT_BODY, False)
                         env["presentation"] = {
                             "status": {"key": "error", "label": "Error", "tone": "danger"},
@@ -654,6 +674,14 @@ def make_handler(cfg: SidecarConfig):
                     env = error_envelope("internal", "Something went wrong on the bridge", False)
                     env["presentation"] = {"error": error_card("internal")}
                     return (500, env)
+            if path == "/_sidecar/ux/end":
+                shell = live["shell"]
+                if shell.has_unfinished_task():
+                    env = error_envelope("validation", "Completion is not confirmed; Retry checks the original task", False)
+                    env["presentation"] = {"error": error_card("task_in_flight")}
+                    return (409, env)
+                shell.end_task()
+                return (200, shell.snapshot())
             if path == "/_sidecar/ux/retry":
                 shell = live["shell"]
                 if shell.phase.value == "wait":
@@ -674,7 +702,7 @@ def make_handler(cfg: SidecarConfig):
             if not self._allow_request(mutation=True):
                 return
             path = self.path.split("?", 1)[0]
-            if path in {"/_sidecar/ux/run", "/_sidecar/ux/retry", "/_sidecar/ux/poll"}:
+            if path in {"/_sidecar/ux/run", "/_sidecar/ux/retry", "/_sidecar/ux/poll", "/_sidecar/ux/end"}:
                 if not run_lock.acquire(blocking=False):
                     message = "Task in progress" if path.endswith("/retry") else TASK_IN_FLIGHT_BODY
                     env = error_envelope("validation", message, False)
@@ -688,9 +716,6 @@ def make_handler(cfg: SidecarConfig):
                 finally:
                     run_lock.release()
                 return self._json(status, body)
-            if path == "/_sidecar/ux/end":
-                live["shell"].end_task()
-                return self._json(200, live["shell"].snapshot())
             if path == "/_sidecar/pair":
                 if not _is_loopback(self):
                     env = error_envelope("auth.denied", "Pair is loopback-only", False)

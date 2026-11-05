@@ -8,6 +8,7 @@ from benchlink_sidecar.client import BridgeClient
 from benchlink_sidecar.config import load_config
 from benchlink_sidecar.ux import BridgeControlShell, Phase
 from test_retry_recovery import post, capture_review_state
+from recovery_fixtures import wire_result
 
 
 @pytest.fixture
@@ -22,7 +23,7 @@ def accepted_sidecar(monkeypatch):
             return 200,{'type':'health.pong'}
         if req.operation_id=='sessionCreate': return 200,{'type':'session.created','session_id':'sess_accepted'}
         if req.operation_id=='taskCreate':
-            return 200,{'type':'task.result','task_id':req.body['task_id'],'status':'accepted'}
+            return 200,wire_result(req.body['task_id'],req.body['session_id'],'accepted')
         if req.operation_id=='taskGet':
             if mode.get('poll_delay'):
                 import time
@@ -32,8 +33,8 @@ def accepted_sidecar(monkeypatch):
                 mode['break_poll']=False;mode['online']=False
                 raise OSError('loopback fixture interruption after acceptance')
             if not mode['online']: raise OSError('still offline')
-            return 200,{'type':'task.result','task_id':shell.task_id,'session_id':shell.session_id,
-                'status':'succeeded' if mode['finish'] else 'running','summary':'Same accepted task recovered','artifact_links':[]}
+            return 200,wire_result(shell.task_id,shell.session_id,'succeeded' if mode['finish'] else 'running',
+                                   summary='Same accepted task recovered')
         return 200,{}
     monkeypatch.setattr(BridgeClient,'send',send)
     shell=BridgeControlShell(cfg)
@@ -131,7 +132,7 @@ def test_overlapping_health_refreshes_issue_only_one_resume_poll(accepted_sideca
     with sync.sync_playwright() as p:
         browser=p.chromium.launch(headless=True,args=['--no-sandbox'])
         page=browser.new_page();page.set_default_timeout(5000)
-        page.goto(base);page.evaluate('(snap)=>show(snap)',interrupted)
+        page.goto(base);page.wait_for_function('taskStateLoaded');page.evaluate('(snap)=>show(snap)',interrupted)
         mode['online']=True;mode['finish']=True;mode['poll_delay']=0.3
         before=mode['reads'];poll_requests=[]
         page.on('request',lambda r:poll_requests.append(r.url) if r.url.endswith('/_sidecar/ux/poll') else None)
@@ -146,7 +147,7 @@ def test_overlapping_health_refreshes_issue_only_one_resume_poll(accepted_sideca
 def test_terminal_offline_result_is_not_mistaken_for_transport_interruption(accepted_sidecar):
     shell,base,mode,calls,ids=accepted_sidecar
     snap=accept_and_interrupt(base)
-    shell.result={'status':'failed','task_id':shell.task_id,'error_class':'offline'}
+    shell.result=wire_result(shell.task_id,shell.session_id,'failed',error_class='offline')
     mode['online']=True
     status,ready=post(base,'/_sidecar/ux/retry')
     assert status==200 and ready['phase']=='pick'

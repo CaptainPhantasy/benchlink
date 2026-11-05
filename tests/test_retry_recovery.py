@@ -10,6 +10,7 @@ from benchlink_sidecar import server
 from benchlink_sidecar.client import BridgeClient
 from benchlink_sidecar.config import load_config
 from benchlink_sidecar.ux import BridgeControlShell, Phase, WaitStatus
+from recovery_fixtures import wire_result
 
 
 def post(base, path, body=None):
@@ -27,15 +28,15 @@ def terminal_sidecar(monkeypatch):
         calls.append(req.operation_id)
         if req.operation_id=='health': return 200,{'type':'health.pong'}
         if req.operation_id=='sessionCreate': return 200,{'type':'session.created','session_id':'sess_new'}
-        if req.operation_id=='taskCreate': return 200,{'type':'task.result','task_id':req.body['task_id'],'status':'accepted'}
-        if req.operation_id=='taskGet': return 200,{'type':'task.result','task_id':shell.task_id,'session_id':shell.session_id,'status':'succeeded','summary':'Recovered after an explicit Send','artifact_links':[]}
+        if req.operation_id=='taskCreate': return 200,wire_result(req.body['task_id'],req.body['session_id'],'accepted')
+        if req.operation_id=='taskGet': return 200,wire_result(shell.task_id,shell.session_id,'succeeded',summary='Recovered after an explicit Send')
         return 200,{}
     monkeypatch.setattr(BridgeClient,'send',send)
     shell=BridgeControlShell(cfg)
     shell.phase=Phase.ERROR; shell.wait_status=WaitStatus.ERROR
     shell.goal='Keep this exact task text'; shell.target_key='ethan'; shell.high_priority=True
     shell.session_id='sess_terminal'; shell.task_id='task_terminal'
-    shell.result={'status':'failed','task_id':shell.task_id,'session_id':shell.session_id,'error_class':'internal'}
+    shell.result=wire_result(shell.task_id,shell.session_id,'failed',error_class='internal')
     shell.error={'code':'internal','message':'fixture terminal error'}
     monkeypatch.setattr(server,'BridgeControlShell',lambda *a,**k:shell)
     sc=server.serve(replace(cfg,listen_port=0))
@@ -149,8 +150,10 @@ def test_stale_error_retry_409_keeps_send_locked(terminal_sidecar):
     with sync.sync_playwright() as p:
         browser=p.chromium.launch(headless=True,args=['--no-sandbox'])
         page=browser.new_page();page.set_default_timeout(5000)
-        page.goto(base);page.locator('#goal').fill(shell.goal)
+        page.goto(base);page.wait_for_function('taskStateLoaded')
+        # Deliberately restore the captured stale client view after loading live state.
         page.evaluate('(snap)=>show(snap)',stale)
+        page.locator('#goal').fill(shell.goal)
         page.locator('#errPrimary').click()
         page.wait_for_function('!recovering && document.getElementById("errTitle").textContent==="Task in progress"')
         assert page.locator('#send').is_disabled()
@@ -174,6 +177,7 @@ def test_offline_retry_never_resets_uncertain_nonterminal_task(terminal_sidecar,
         page.set_default_timeout(5000)
         page.route("**/*", lambda r: r.continue_() if r.request.url.startswith(base + "/") else r.abort())
         page.goto(base)
+        page.wait_for_function("taskStateLoaded")
         page.evaluate("snap => show(snap)", shell.snapshot())
         # Await the complete action. Beta 03 resumes this accepted task; lower
         # branches only health-check. Neither is allowed to reset or replace it.

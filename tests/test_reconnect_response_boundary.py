@@ -158,7 +158,9 @@ def test_browser_reconnect_survives_completed_response_preemption(
         try:
             page.goto(base)
             page.wait_for_function("connectionKey==='disconnected'")
-            page.locator("#goal").fill(initial["goal"])
+            page.wait_for_function("taskStateLoaded")
+            assert page.locator("#goal").get_attribute("readonly") is not None
+            assert page.evaluate("lastSnapshot.goal")==initial["goal"]
             page.evaluate("snap => show(snap)", initial)
             gate.update(route="/_sidecar/ux/poll", status=200)
             mode["online"] = True

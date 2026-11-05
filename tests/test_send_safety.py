@@ -105,7 +105,7 @@ def test_html_has_radiogroup_and_no_o1_user_copy():
             with urllib.request.urlopen(base + "/", timeout=3) as r:
                 html = r.read().decode()
             assert 'role="radiogroup"' in html
-            assert "End the current task to change target" in html or "rosterLocked" in html
+            assert "Wait for confirmed completion to change target" in html or "rosterLocked" in html
             assert "O1" not in html  # no internal codes in UI
             assert "Bridge Control HTML send" not in html
         finally:

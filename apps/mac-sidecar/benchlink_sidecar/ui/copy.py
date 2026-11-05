@@ -89,7 +89,7 @@ _ERROR_TEMPLATES: dict[str, tuple[str, str, str, str | None]] = {
     ),
     "task_in_flight": (
         "Task in progress",
-        "A task is in flight. End task first, then pick a target and send again.",
+        "A task is in flight. Wait for confirmed completion before starting another.",
         "End task",
         None,
     ),
