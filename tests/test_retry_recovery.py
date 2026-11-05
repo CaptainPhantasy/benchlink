@@ -44,8 +44,11 @@ def terminal_sidecar(monkeypatch):
     finally: sc.shutdown();sc.server_close()
 
 
-def test_terminal_retry_clears_error_preserves_draft_without_dispatch(terminal_sidecar):
+@pytest.mark.parametrize("terminal_code", ["internal", "offline"])
+def test_terminal_retry_clears_error_preserves_draft_without_dispatch(terminal_sidecar, terminal_code):
     shell,base,calls=terminal_sidecar
+    shell.result["error_class"] = terminal_code
+    shell.error["code"] = terminal_code
     status,snap=post(base,'/_sidecar/ux/retry')
     assert status==200
     assert snap['phase']=='pick' and snap['wait_status']=='idle'
@@ -67,12 +70,18 @@ def test_retry_refuses_inflight_without_closing_or_recreating(terminal_sidecar):
     assert calls==[]
 
 
-def test_retry_button_actual_dom_recovers_once_then_explicit_send(terminal_sidecar):
+@pytest.mark.parametrize("terminal_code", ["internal", "offline"])
+def test_retry_button_actual_dom_recovers_once_then_explicit_send(terminal_sidecar, terminal_code):
     sync=pytest.importorskip('playwright.sync_api')
     shell,base,calls=terminal_sidecar
+    shell.result["error_class"] = terminal_code
+    shell.error["code"] = terminal_code
     with sync.sync_playwright() as p:
         browser=p.chromium.launch(headless=True,args=['--no-sandbox'])
         page=browser.new_page(viewport={'width':1280,'height':800}); page.set_default_timeout(5000); errors=[];page.on('pageerror',lambda e:errors.append(str(e)))
+        requests=[]
+        page.on('request',lambda r:requests.append(r.url))
+        page.route('**/*',lambda r:r.continue_() if r.request.url.startswith(base+'/') else r.abort())
         page.goto(base)
         page.locator('#goal').fill(shell.goal)
         page.evaluate('(snap)=>{target=snap.target;lastSent={target:snap.target,goal:snap.goal,high_priority:snap.high_priority};show(snap)}',shell.snapshot())
@@ -84,6 +93,9 @@ def test_retry_button_actual_dom_recovers_once_then_explicit_send(terminal_sidec
         assert page.locator('#hp').is_checked()
         assert page.locator('#errorCard').is_hidden()
         assert calls.count('sessionClose')==1 and calls.count('taskCreate')==0
+        assert calls.count('sessionCreate')==0
+        assert shell.phase==Phase.PICK and shell.task_id is None and shell.session_id is None
+        assert sum(url.endswith('/_sidecar/ux/retry') for url in requests)==1
         capture_review_state(page,'W-retry-ready')
         page.wait_for_function('!document.getElementById("send").disabled')
         page.locator('#send').click()
@@ -145,4 +157,31 @@ def test_stale_error_retry_409_keeps_send_locked(terminal_sidecar):
         page.evaluate('document.getElementById("send").click()')
         assert calls.count('taskCreate')==0 and calls.count('sessionClose')==0
         assert shell.phase==Phase.WAIT and shell.task_id=='task_terminal'
+        browser.close()
+
+
+@pytest.mark.parametrize("result_status", [None, "accepted", "running"])
+def test_offline_retry_never_resets_uncertain_nonterminal_task(terminal_sidecar, result_status):
+    """Only a known failed result may take the terminal-offline reset path."""
+    sync = pytest.importorskip("playwright.sync_api")
+    shell, base, calls = terminal_sidecar
+    shell.error["code"] = "offline"
+    shell.result = {"status": result_status} if result_status else None
+    with sync.sync_playwright() as p:
+        browser = p.chromium.launch(headless=True, args=["--no-sandbox"])
+        page = browser.new_page()
+        page.set_default_timeout(5000)
+        page.route("**/*", lambda r: r.continue_() if r.request.url.startswith(base + "/") else r.abort())
+        page.goto(base)
+        page.evaluate("snap => show(snap)", shell.snapshot())
+        with page.expect_response(lambda r: r.url.endswith("/v1/health") and r.status == 200):
+            page.locator("#errPrimary").click()
+        # Await another complete Retry to verify the asynchronous health-only path.
+        page.evaluate("actions.Retry()")
+        assert page.evaluate("lastSnapshot.phase") == "error"
+        assert page.evaluate("lastSnapshot.task_id") == "task_terminal"
+        assert shell.phase == Phase.ERROR and shell.session_id == "sess_terminal"
+        assert calls.count("sessionClose") == calls.count("taskCreate") == 0
+        assert calls.count("taskGet") == 0
+        assert calls.count("health") >= 1
         browser.close()

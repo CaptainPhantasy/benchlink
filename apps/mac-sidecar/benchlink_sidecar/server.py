@@ -175,6 +175,8 @@ async function resend(toFloyd=false) {
 }
 const actions = {
   'Retry': async () => {
+    // A known terminal result is task recovery, not a connection-only retry.
+    if (lastSnapshot.phase==='error' && (lastSnapshot.result || {}).status==='failed') return retryTerminal();
     if (((lastSnapshot.presentation || {}).error || {}).details_code === 'offline') {
       try { const r=await fetch('/v1/health'); if (!r.ok) showError({code:'offline'}); else banner.style.display='none'; }
       catch (e) { showError({code:'offline'}); }
