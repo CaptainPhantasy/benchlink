@@ -20,6 +20,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from . import CONTRACT_VERSION, __version__
 from .client import BridgeClient
 from .config import ConfigError, SidecarConfig, describe
+from .ui.copy import copy_tables_for_html
 from .ux import DEFAULT_TARGET, ROSTER, BridgeControlShell
 
 
@@ -38,55 +39,127 @@ HTML_SHELL = """<!DOCTYPE html>
  button{margin:4px 4px 4px 0;padding:6px 10px;cursor:pointer}
  textarea{width:100%;min-height:80px;background:#0f1115;color:#e8eaed;border:1px solid #3c4043;border-radius:6px;padding:8px}
  .banner{background:#3a2a00;border:1px solid #f9ab00;padding:8px;border-radius:6px;margin:8px 0}
- .ok{color:#81c995} .warn{color:#fdd663}
+ .pill{display:inline-block;padding:2px 10px;border-radius:999px;font-weight:600;font-size:12px}
+ .pill.neutral{background:#2c2e33;color:#b4b6bc}
+ .pill.info{background:#16203a;color:#7faeff}
+ .pill.success{background:#16271d;color:#5cc98a}
+ .pill.danger{background:#2e1816;color:#ff7b70}
+ .err-title{font-weight:600;margin:0 0 4px} .err-body{margin:0 0 8px;color:#b4b6bc}
+ .result-summary{font-size:15px;margin:0 0 8px} .links a{color:#7fa0ff;display:block;margin:2px 0}
+ .meta{color:#8e9198;font-size:12px;margin-top:8px}
+ details{margin-top:8px;color:#8e9198;font-family:ui-monospace,monospace;font-size:12px}
 </style></head><body>
-<h1>Benchlink · Bridge Control</h1>
-<p class="muted">Companion sidecar UI (O6). Amir v0.2 · Pick → Compose/Send → Wait. Soft O1–O6 locked.</p>
+<h1>Benchlink · Bridge Control <span class="muted">[Beta]</span></h1>
+<p class="muted">Companion sidecar UI. Pick → Compose/Send → Wait.</p>
 <div id="banner" class="banner" style="display:none"></div>
 <div class="card" id="pick">
-  <strong>1 · Pick target</strong> (S2 static roster; Floyd default)
+  <strong>1 · Pick target</strong>
   <div id="roster"></div>
 </div>
 <div class="card" id="compose">
-  <strong>2 · Compose + Send</strong> <span class="muted">(= session.create → task.create)</span><br/>
-  Target: <span id="targetLabel">floyd</span>
-  <label><input type="checkbox" id="hp"/> High priority (Floyd chat) — O3 default OFF</label>
-  <textarea id="goal" placeholder="Type Staff task here in Bridge Control…"></textarea>
+  <strong>2 · Compose + Send</strong><br/>
+  Target: <span id="targetLabel">Floyd</span>
+  <label><input type="checkbox" id="hp"/> High priority (also ping Floyd in chat)</label>
+  <textarea id="goal" placeholder="Describe what you need."></textarea>
   <button id="send">Send task</button>
 </div>
 <div class="card" id="wait">
-  <strong>3 · Wait · Bridge status</strong>
-  <div id="status" class="muted">Idle</div>
-  <pre id="result" style="white-space:pre-wrap"></pre>
-  <button id="end">End task → re-pick</button>
+  <strong>3 · Status</strong>
+  <div><span id="statusPill" class="pill neutral">Idle</span></div>
+  <div id="resultCard" style="display:none;margin-top:12px">
+    <p class="result-summary" id="resultSummary"></p>
+    <div class="links" id="resultLinks"></div>
+    <p class="meta" id="resultMeta"></p>
+  </div>
+  <div id="errorCard" style="display:none;margin-top:12px">
+    <p class="err-title" id="errTitle"></p>
+    <p class="err-body" id="errBody"></p>
+    <button type="button" id="errPrimary" style="display:none"></button>
+    <button type="button" id="errSecondary" style="display:none"></button>
+    <details id="errDetails"><summary>Details</summary>
+      <div>code: <span id="errCode"></span></div>
+      <div>HTTP: <span id="errHttp"></span></div>
+      <div>correlation: <span id="errCorr"></span></div>
+    </details>
+  </div>
+  <button id="end">End task</button>
 </div>
 <script>
 const roster = __ROSTER__;
 const offline = __OFFLINE__;
+const COPY = __COPY__;
 const banner = document.getElementById('banner');
-if (offline) { banner.style.display='block'; banner.textContent = 'Offline / fail-closed: ' + offline + ' — Send uses dry-run payloads (no DNS invented).'; }
+if (offline) { banner.style.display='block'; banner.textContent = 'Offline / fail-closed: ' + offline + '. Send uses dry-run payloads (no DNS invented).'; }
 const rost = document.getElementById('roster');
 let target = '__DEFAULT__';
+function displayName(key) {
+  const e = roster.find(x => x.key === key);
+  return e ? e.display : key;
+}
 roster.forEach(e => {
   const b = document.createElement('button');
   b.textContent = e.display + (e.default ? ' (default)' : '');
-  b.onclick = () => { target = e.key; document.getElementById('targetLabel').textContent = e.key; };
+  b.onclick = () => { target = e.key; document.getElementById('targetLabel').textContent = e.display; };
   rost.appendChild(b);
 });
+document.getElementById('targetLabel').textContent = displayName(target);
+
+function show(snap) {
+  const pres = snap.presentation || {};
+  const st = pres.status || COPY.status[snap.wait_status] || COPY.status.idle;
+  const pill = document.getElementById('statusPill');
+  pill.textContent = st.label;
+  pill.className = 'pill ' + (st.tone || 'neutral');
+
+  const rc = document.getElementById('resultCard');
+  const ec = document.getElementById('errorCard');
+  rc.style.display = 'none';
+  ec.style.display = 'none';
+
+  if (pres.result && snap.wait_status === 'result') {
+    rc.style.display = 'block';
+    document.getElementById('resultSummary').textContent = pres.result.summary || '';
+    const links = document.getElementById('resultLinks');
+    links.innerHTML = '';
+    (pres.result.artifact_links || []).forEach(l => {
+      const a = document.createElement('a');
+      a.href = l.url; a.target = '_blank'; a.rel = 'noopener';
+      a.textContent = l.label || l.url; a.title = l.url;
+      links.appendChild(a);
+    });
+    if (!pres.result.has_links) {
+      const note = document.createElement('p');
+      note.className = 'muted';
+      note.textContent = pres.result.empty_links_note || 'No links returned';
+      links.appendChild(note);
+    }
+    document.getElementById('resultMeta').textContent = pres.result.meta || '';
+  }
+
+  if (pres.error || snap.error) {
+    const err = pres.error || {};
+    ec.style.display = 'block';
+    document.getElementById('errTitle').textContent = err.title || 'Something went wrong on the bridge';
+    document.getElementById('errBody').textContent = err.body || '';
+    document.getElementById('errCode').textContent = err.details_code || (snap.error && snap.error.code) || '';
+    document.getElementById('errHttp').textContent = (err.http != null ? err.http : '');
+    document.getElementById('errCorr').textContent = err.correlation_id || '';
+    const p = document.getElementById('errPrimary');
+    const s = document.getElementById('errSecondary');
+    if (err.primary) { p.style.display = 'inline-block'; p.textContent = err.primary; } else { p.style.display = 'none'; }
+    if (err.secondary) { s.style.display = 'inline-block'; s.textContent = err.secondary; } else { s.style.display = 'none'; }
+  }
+}
+
 document.getElementById('send').onclick = async () => {
   const goal = document.getElementById('goal').value.trim();
   if (!goal) { alert('Compose a Staff task first'); return; }
   const r = await fetch('/_sidecar/ux/run', {method:'POST', headers:{'Content-Type':'application/json'},
     body: JSON.stringify({target, goal, high_priority: document.getElementById('hp').checked})});
   const j = await r.json();
-  const show = (snap) => {
-    const err = snap.error ? (' error=' + snap.error.code) : '';
-    document.getElementById('status').textContent = 'status=' + snap.wait_status + ' phase=' + snap.phase + err;
-    document.getElementById('result').textContent = JSON.stringify(snap.result || snap.error || {}, null, 2);
-  };
-  if (!j.snapshot) { document.getElementById('result').textContent = JSON.stringify(j, null, 2); return; }
-  show(j.snapshot);
+  if (!j.snapshot) { show({wait_status:'error', error:j, presentation:{status:COPY.status.error, error:{title:'Task couldn\\'t be sent', body:j.message || '', details_code:j.code || 'validation', primary:'Edit task', secondary:'Details'}}}); return; }
   let snap = j.snapshot;
+  show(snap);
   while (snap.phase === 'wait') {
     await new Promise(res => setTimeout(res, 2000));
     snap = await (await fetch('/_sidecar/ux/poll', {method:'POST'})).json();
@@ -94,9 +167,8 @@ document.getElementById('send').onclick = async () => {
   }
 };
 document.getElementById('end').onclick = async () => {
-  await fetch('/_sidecar/ux/end', {method:'POST'});
-  document.getElementById('status').textContent = 'Idle (ended → re-pick)';
-  document.getElementById('result').textContent = '';
+  const snap = await (await fetch('/_sidecar/ux/end', {method:'POST'})).json();
+  show(snap);
   document.getElementById('goal').value = '';
   document.getElementById('hp').checked = false;
 };
@@ -141,6 +213,7 @@ def make_handler(cfg: SidecarConfig):
                 html = (HTML_SHELL
                         .replace("__ROSTER__", json.dumps(shell.roster()))
                         .replace("__OFFLINE__", json.dumps(shell.offline_banner))
+                        .replace("__COPY__", json.dumps(copy_tables_for_html()))
                         .replace("__DEFAULT__", DEFAULT_TARGET))
                 return self._html(200, html)
             if path == "/v1/health":
