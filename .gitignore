@@ -20,3 +20,4 @@ device_ed25519*
 results/
 benchlink-results/
 pairing-proof-*.log
+*.egg-info/

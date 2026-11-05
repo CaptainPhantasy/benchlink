@@ -5,5 +5,5 @@ Two pluggable seams:
   ResultSource  how the bot's task.result comes back (drive_folder [default] |
                 local_folder | http_callback)
 """
-__version__ = "0.2.0-mvp-roundtrip"
+__version__ = "0.2.0+mvp.roundtrip"
 CONTRACT_VERSION = "0.2.0-mvp"
