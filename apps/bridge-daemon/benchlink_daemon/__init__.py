@@ -7,7 +7,7 @@ Computer is the edit home; inference path later:
 import sys as _sys
 from pathlib import Path as _Path
 
-__version__ = "0.2.0-mvp-roundtrip"
+__version__ = "0.2.0+mvp.roundtrip"
 CONTRACT_VERSION = "0.2.0-mvp"
 
 # staff-adapter lives beside us in the repo (apps/staff-adapter); make it importable
