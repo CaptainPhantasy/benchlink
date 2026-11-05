@@ -1,0 +1,40 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://floydslabs.local/bridge/v1/auth_pair_request.schema.json",
+  "title": "auth.pair.request",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "v",
+    "type",
+    "device_id",
+    "client",
+    "client_version",
+    "nonce"
+  ],
+  "properties": {
+    "v": {
+      "const": "1"
+    },
+    "type": {
+      "const": "auth.pair.request"
+    },
+    "device_id": {
+      "type": "string",
+      "minLength": 1
+    },
+    "client": {
+      "const": "grok.app"
+    },
+    "client_version": {
+      "type": "string"
+    },
+    "nonce": {
+      "type": "string",
+      "minLength": 8
+    },
+    "tailscale_identity": {
+      "type": "string"
+    }
+  }
+}

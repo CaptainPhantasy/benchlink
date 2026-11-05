@@ -1,0 +1,32 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://floydslabs.local/bridge/v1/auth_pair_challenge.schema.json",
+  "title": "auth.pair.challenge",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "v",
+    "type",
+    "nonce",
+    "challenge",
+    "expires_at"
+  ],
+  "properties": {
+    "v": {
+      "const": "1"
+    },
+    "type": {
+      "const": "auth.pair.challenge"
+    },
+    "nonce": {
+      "type": "string"
+    },
+    "challenge": {
+      "type": "string",
+      "minLength": 1
+    },
+    "expires_at": {
+      "$ref": "common.schema.json#/$defs/iso8601"
+    }
+  }
+}
