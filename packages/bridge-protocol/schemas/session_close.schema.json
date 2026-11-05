@@ -1,0 +1,36 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://floydslabs.local/bridge/v1/session_close.schema.json",
+  "title": "session.close",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "v",
+    "type",
+    "access_token",
+    "session_id",
+    "reason"
+  ],
+  "properties": {
+    "v": {
+      "const": "1"
+    },
+    "type": {
+      "const": "session.close"
+    },
+    "access_token": {
+      "type": "string",
+      "minLength": 16
+    },
+    "session_id": {
+      "$ref": "common.schema.json#/$defs/uuidLike"
+    },
+    "reason": {
+      "enum": [
+        "user_done",
+        "error",
+        "timeout"
+      ]
+    }
+  }
+}
