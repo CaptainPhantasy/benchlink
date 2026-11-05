@@ -1,7 +1,9 @@
 """Bridge Control UI helpers (presentation only; wire contract unchanged)."""
 
 from .copy import (
+    CONNECTION,
     ERROR_CARDS,
+    PAIRING,
     STATUS,
     TASK_IN_FLIGHT_BODY,
     TASK_IN_FLIGHT_TITLE,
@@ -11,7 +13,9 @@ from .copy import (
 )
 
 __all__ = [
+    "CONNECTION",
     "ERROR_CARDS",
+    "PAIRING",
     "STATUS",
     "TASK_IN_FLIGHT_BODY",
     "TASK_IN_FLIGHT_TITLE",

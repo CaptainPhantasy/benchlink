@@ -17,14 +17,16 @@ def guarded_sidecar(monkeypatch):
     class RecordingShell:
         phase = Phase()
         offline_banner = None
+        dry_run_mode = False
         def roster(self): return []
-        def snapshot(self): return {"phase": "pick"}
+        def snapshot(self): return {"phase": "pick", "task_in_flight": False}
         def start_and_wait(self, **kwargs):
             calls.append("run")
-            return {"snapshot": {"phase": "pick"}, "send": {"mode": "live"}}
+            return {"snapshot": {"phase": "pick", "task_in_flight": False}, "send": {"mode": "live"}}
         def end_task(self): calls.append("end")
         def retry_terminal_error(self): calls.append("retry")
         def can_resume_interrupted_wait(self): return False
+        def has_unfinished_task(self): return False
     monkeypatch.setattr(server, "BridgeControlShell", lambda *a, **kw: RecordingShell())
     monkeypatch.setattr(server.BridgeClient, "health", lambda self: (calls.append("health") or (200, {"type": "health.pong"})))
     cfg = load_config({"BENCHLINK_BRIDGE_BASE_URL": "http://127.0.0.1:9"})
@@ -97,7 +99,8 @@ def test_same_origin_browser_json_reaches_loopback(guarded_sidecar):
         page.route("**/*", lambda r: r.continue_() if r.request.url.startswith(base + "/") else r.abort())
         page.goto(base)
         response = page.evaluate("async () => {const r = await fetch('/_sidecar/ux/run', {method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({goal:'browser fixture'})}); return r.status}")
-        assert response == 200 and calls == ["run"]
+        assert response == 200 and calls.count("run") == 1
+        assert set(calls) <= {"run", "health"}
         browser.close()
 
 
