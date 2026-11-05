@@ -6,9 +6,10 @@ Routes:
                             otherwise 503 with an `error` envelope (code=offline).
                             The sidecar never fabricates a health.pong (that
                             schema asserts runtime=inference).
-  GET /_sidecar/status   -> NON-CONTRACT local diagnostics (redacted config)
+  GET /_sidecar/status   -> NON-CONTRACT local diagnostics (redacted config + connection/pairing)
   GET /_sidecar/ux       -> NON-CONTRACT JSON snapshot helper for the HTML shell
   POST /_sidecar/ux/run|poll|end -> NON-CONTRACT live Bridge Control session (pairs + bearer via client)
+  POST /_sidecar/pair    -> NON-CONTRACT loopback-only Pair/Re-pair for enrolled devices
 Everything else -> 404 error envelope.
 """
 from __future__ import annotations
@@ -20,7 +21,12 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from . import CONTRACT_VERSION, __version__
 from .client import BridgeClient
 from .config import ConfigError, SidecarConfig, describe
-from .ui.copy import TASK_IN_FLIGHT_BODY, copy_tables_for_html, error_card
+from .ui.copy import (
+    CONNECTION,
+    TASK_IN_FLIGHT_BODY,
+    copy_tables_for_html,
+    error_card,
+)
 from .ux import DEFAULT_TARGET, ROSTER, BridgeControlShell
 
 
@@ -53,9 +59,34 @@ HTML_SHELL = """<!DOCTYPE html>
  .opt:disabled{opacity:0.5;cursor:not-allowed}
  button:disabled{opacity:0.5;cursor:not-allowed}
 </style></head><body>
-<h1>Benchlink · Bridge Control <span class="muted">[Beta]</span></h1>
+<div style="display:flex;align-items:center;justify-content:space-between;gap:12px">
+  <h1 style="margin:0">Benchlink · Bridge Control <span class="muted">[Beta]</span></h1>
+  <button type="button" id="connPill" class="pill warning" title="Open connection">Preview mode (offline)</button>
+</div>
 <p class="muted">Companion sidecar UI. Pick → Compose/Send → Wait.</p>
 <div id="banner" class="banner" style="display:none"></div>
+<div id="previewBanner" class="banner" style="display:none">Preview mode. The bridge address isn't set on this Mac, so tasks can't be sent.</div>
+<div class="card" id="setup">
+  <strong>Setup</strong>
+  <div id="bridgeRow">Bridge: <span id="bridgeLabel">…</span></div>
+  <div id="pairingRow">Pairing: <span id="pairingLabel">…</span></div>
+  <div id="deviceRow">Device: <code id="deviceId"></code>
+    <button type="button" id="copyDevice">Copy</button></div>
+  <button type="button" id="pairBtn">Pair this Mac</button>
+  <p class="muted">Device-bound sign-in. Tokens are never shown.</p>
+</div>
+<div class="card" id="s4" style="display:none">
+  <strong>Connection</strong>
+  <p id="s4Reason" class="muted"></p>
+  <button type="button" id="s4Retry">Retry</button>
+  <button type="button" id="s4Repair">Re-pair</button>
+  <details><summary>Details</summary>
+    <div>transport: <span id="s4Transport"></span></div>
+    <div>host: <span id="s4Host"></span></div>
+    <div>last error: <span id="s4Err"></span></div>
+  </details>
+  <button type="button" id="s4Close">Close</button>
+</div>
 <div class="card" id="pick">
   <strong>1 · Pick target</strong>
   <div id="roster" role="radiogroup" aria-label="Staff target"></div>
@@ -95,11 +126,83 @@ HTML_SHELL = """<!DOCTYPE html>
 const roster = __ROSTER__;
 const offline = __OFFLINE__;
 const COPY = __COPY__;
+const previewMode = __PREVIEW__;
 const banner = document.getElementById('banner');
-if (offline) { banner.style.display='block'; banner.textContent = 'Offline / fail-closed: ' + offline + '. Send uses dry-run payloads (no DNS invented).'; }
+const previewBanner = document.getElementById('previewBanner');
+if (previewMode) {
+  previewBanner.style.display = 'block';
+} else if (offline) {
+  banner.style.display='block';
+  banner.textContent = 'Disconnected. Check Tailscale, then retry.';
+}
 const rost = document.getElementById('roster');
 let target = '__DEFAULT__';
 let inflight = false;
+let pairingState = 'not_paired';
+
+async function refreshStatus() {
+  try {
+    const st = await (await fetch('/_sidecar/status')).json();
+    const conn = st.connection || {};
+    const pair = st.pairing || {};
+    document.getElementById('bridgeLabel').textContent = conn.label || '…';
+    let pl = pair.label || 'Not paired';
+    if (pair.state === 'paired' && pair.expires_at) {
+      try {
+        const d = new Date(pair.expires_at);
+        pl = 'Paired · expires ' + d.toLocaleTimeString([], {hour:'numeric', minute:'2-digit'});
+      } catch (e) { pl = 'Paired'; }
+    }
+    document.getElementById('pairingLabel').textContent = pl;
+    document.getElementById('deviceId').textContent = pair.device_id || '';
+    pairingState = pair.state || 'not_paired';
+    const btn = document.getElementById('pairBtn');
+    if (pairingState === 'not_allowed') {
+      btn.style.display = 'none';
+    } else if (pairingState === 'paired') {
+      btn.style.display = 'none';
+    } else if (pairingState === 'expired' || pairingState === 'failed') {
+      btn.style.display = 'inline-block'; btn.textContent = 'Re-pair'; btn.disabled = false;
+    } else {
+      btn.style.display = 'inline-block'; btn.textContent = 'Pair this Mac'; btn.disabled = false;
+    }
+    const pill = document.getElementById('connPill');
+    pill.textContent = conn.label || '…';
+    pill.className = 'pill ' + (conn.tone || 'neutral');
+    document.getElementById('s4Reason').textContent = conn.label || '';
+    document.getElementById('s4Host').textContent = (st.config && (st.config.BENCHLINK_BRIDGE_BASE_URL || st.config.base_url)) || '(unset)';
+    document.getElementById('s4Transport').textContent = st.upstream_configured ? 'configured' : 'preview';
+    document.getElementById('s4Err').textContent = (pair.error || '');
+    document.getElementById('s4Repair').style.display = (pairingState === 'not_allowed') ? 'none' : 'inline-block';
+  } catch (e) { /* ignore */ }
+}
+document.getElementById('connPill').onclick = () => {
+  document.getElementById('s4').style.display = 'block';
+};
+document.getElementById('s4Close').onclick = () => {
+  document.getElementById('s4').style.display = 'none';
+};
+document.getElementById('s4Retry').onclick = () => refreshStatus();
+document.getElementById('s4Repair').onclick = () => document.getElementById('pairBtn').click();
+
+document.getElementById('copyDevice').onclick = async () => {
+  const id = document.getElementById('deviceId').textContent;
+  try { await navigator.clipboard.writeText(id); } catch (e) {}
+};
+document.getElementById('pairBtn').onclick = async () => {
+  const btn = document.getElementById('pairBtn');
+  btn.disabled = true; btn.textContent = 'Pairing';
+  const r = await fetch('/_sidecar/pair', {method:'POST', headers:{'Content-Type':'application/json'}, body:'{}'});
+  const j = await r.json();
+  await refreshStatus();
+  if (!r.ok) {
+    banner.style.display = 'block';
+    banner.textContent = (j.presentation && j.presentation.error && j.presentation.error.title)
+      || j.message || 'Pairing failed';
+  }
+};
+refreshStatus();
+setInterval(refreshStatus, 30000);
 function displayName(key) {
   const e = roster.find(x => x.key === key);
   return e ? e.display : key;
@@ -131,9 +234,16 @@ function updateSendEnabled() {
   const goal = document.getElementById('goal').value.trim();
   const btn = document.getElementById('send');
   const hint = document.getElementById('sendHint');
-  if (inflight) {
+  if (previewMode) {
+    btn.disabled = true;
+    hint.textContent = "Preview mode. The bridge address isn't set on this Mac, so tasks can't be sent.";
+  } else if (inflight) {
     btn.disabled = true;
     hint.textContent = 'A task is in flight. End task first, then pick a target and send again.';
+  } else if (pairingState === 'not_paired' || pairingState === 'expired'
+             || pairingState === 'failed' || pairingState === 'not_allowed') {
+    btn.disabled = true;
+    hint.textContent = 'Pair this Mac before sending.';
   } else if (!goal) {
     btn.disabled = true;
     hint.textContent = '';
@@ -199,7 +309,7 @@ function show(snap) {
 
 document.getElementById('send').onclick = async () => {
   const goal = document.getElementById('goal').value.trim();
-  if (!goal || inflight) return;
+  if (!goal || inflight || previewMode) return;
   const notice = document.getElementById('inflightNotice');
   notice.style.display = 'none';
   const r = await fetch('/_sidecar/ux/run', {method:'POST', headers:{'Content-Type':'application/json'},
@@ -242,6 +352,34 @@ document.getElementById('end').onclick = async () => {
 """
 
 
+def _is_loopback(handler: BaseHTTPRequestHandler) -> bool:
+    host = handler.client_address[0] if handler.client_address else ""
+    return host in {"127.0.0.1", "::1", "localhost"}
+
+
+def connection_view(cfg: SidecarConfig, client: BridgeClient) -> dict:
+    """Header / S1 connection pill. Preview when upstream unset/placeholder."""
+    if not cfg.upstream_configured:
+        key = "not_configured"
+    else:
+        try:
+            st, body = client.health()
+            if st == 200 and isinstance(body, dict) and body.get("type") == "health.pong":
+                key = "connected"
+            else:
+                key = "disconnected"
+        except (ConfigError, OSError):
+            # ConfigError on placeholder without allow → still preview
+            try:
+                _ = cfg.api_base
+                key = "disconnected"
+            except ConfigError:
+                key = "not_configured"
+    label, tone = CONNECTION[key]
+    return {"key": key, "label": label, "tone": tone}
+
+
+
 def make_handler(cfg: SidecarConfig):
     client = BridgeClient(cfg)
     # One in-memory Bridge Control session per sidecar process (O4 session-only retention)
@@ -276,10 +414,12 @@ def make_handler(cfg: SidecarConfig):
             path = self.path.split("?", 1)[0]
             if path in {"/", "/index.html"}:
                 shell = BridgeControlShell(cfg)
+                preview = bool(shell.dry_run_mode or not cfg.upstream_configured)
                 html = (HTML_SHELL
                         .replace("__ROSTER__", json.dumps(shell.roster()))
                         .replace("__OFFLINE__", json.dumps(shell.offline_banner))
                         .replace("__COPY__", json.dumps(copy_tables_for_html()))
+                        .replace("__PREVIEW__", "true" if preview else "false")
                         .replace("__DEFAULT__", DEFAULT_TARGET))
                 return self._html(200, html)
             if path == "/v1/health":
@@ -291,9 +431,14 @@ def make_handler(cfg: SidecarConfig):
                 except OSError as e:
                     return self._json(502, error_envelope("offline", f"upstream unreachable: {e}", True))
             if path == "/_sidecar/status":
+                conn = connection_view(cfg, client)
+                pairing = client.pairing_snapshot()
                 return self._json(200, {"sidecar_version": __version__,
                                         "contract": CONTRACT_VERSION,
                                         "upstream_configured": cfg.upstream_configured,
+                                        "preview_mode": conn["key"] == "not_configured",
+                                        "connection": conn,
+                                        "pairing": pairing,
                                         "config": describe(cfg),
                                         "roster_keys": [e.key for e in ROSTER]})
             if path == "/_sidecar/ux":
@@ -306,6 +451,17 @@ def make_handler(cfg: SidecarConfig):
                 try:
                     body = self._read_json()
                     shell = live["shell"]
+                    # Ruling 2: Preview mode — HTML never simulates an offline success.
+                    if shell.dry_run_mode or not cfg.upstream_configured:
+                        env = error_envelope(
+                            "offline",
+                            "Preview mode. The bridge address isn't set on this Mac, so tasks can't be sent.",
+                            False)
+                        env["presentation"] = {
+                            "status": {"key": "error", "label": "Error", "tone": "danger"},
+                            "error": error_card("offline", preview=True),
+                        }
+                        return self._json(503, env)
                     # Ruling 1 / O1: refuse Send while Queued or Running; never silent restart.
                     if shell.phase.value == "wait":
                         env = error_envelope("validation", TASK_IN_FLIGHT_BODY, False)
@@ -363,6 +519,45 @@ def make_handler(cfg: SidecarConfig):
             if path == "/_sidecar/ux/end":
                 live["shell"].end_task()
                 return self._json(200, live["shell"].snapshot())
+            if path == "/_sidecar/pair":
+                if not _is_loopback(self):
+                    return self._json(403, error_envelope(
+                        "auth.denied", "pair is loopback-only", False))
+                try:
+                    # Drop any prior bearer so Re-pair always hits the daemon.
+                    client._live_token = None  # noqa: SLF001 — intentional re-pair
+                    client.pairing_state = "not_paired"
+                    info = client.pair()
+                    return self._json(200, {
+                        "state": "paired",
+                        "expires_at": info.get("expires_at"),
+                        "device_id": cfg.device_id,
+                    })
+                except Exception as e:  # noqa: BLE001
+                    from .pairing import PairingError
+                    if isinstance(e, PairingError):
+                        state = client.pairing_state
+                        code = e.code or "internal"
+                        http = e.http_status or (403 if code == "auth.denied" else 400)
+                        return self._json(http, {
+                            "v": "1", "type": "error", "code": code,
+                            "message": e.message, "retryable": False,
+                            "correlation_id": "sc_pair",
+                            "state": state,
+                            "device_id": cfg.device_id,
+                            "presentation": {
+                                "error": error_card(code, device_id=cfg.device_id),
+                            },
+                        })
+                    client.pairing_state = "failed"
+                    client.pairing_error = str(e)
+                    return self._json(400, {
+                        "v": "1", "type": "error", "code": "internal",
+                        "message": str(e), "retryable": False,
+                        "correlation_id": "sc_pair",
+                        "state": "failed",
+                        "device_id": cfg.device_id,
+                    })
             return self._json(404, error_envelope("validation", f"no route {path}", False))
 
         def log_message(self, fmt, *args):

@@ -21,6 +21,7 @@ import json
 import urllib.error
 import urllib.request
 from dataclasses import dataclass, field
+from datetime import datetime, timezone
 from urllib.parse import quote
 
 from .config import ConfigError, SidecarConfig
@@ -60,6 +61,9 @@ class BridgeClient:
         self.timeout = timeout
         self._live_token: str | None = cfg.access_token
         self.pair_count = 0
+        self.expires_at: str | None = None  # RFC3339 Z from last successful pair
+        self.pairing_state: str = "paired" if cfg.access_token else "not_paired"
+        self.pairing_error: str | None = None
 
     # ---- D3 pairing ---------------------------------------------------------
     def can_pair(self) -> bool:
@@ -67,12 +71,54 @@ class BridgeClient:
         return Path(self.cfg.device_key_path).expanduser().is_file()
 
     def pair(self) -> dict:
-        """Pair with the device key; keeps the bearer in memory only."""
-        from .pairing import pair
-        tok = pair(self.cfg, timeout=self.timeout)
+        """Pair with the device key; keeps the bearer in memory only.
+
+        Return value never includes access_token (ruling 3).
+        """
+        from .pairing import PairingError, pair
+        try:
+            tok = pair(self.cfg, timeout=self.timeout)
+        except PairingError as e:
+            if e.code == "auth.denied":
+                self.pairing_state = "not_allowed"
+            elif e.code == "auth.expired":
+                self.pairing_state = "expired"
+            else:
+                self.pairing_state = "failed"
+            self.pairing_error = e.message
+            raise
         self._live_token = tok["access_token"]
+        self.expires_at = tok.get("expires_at")
+        self.pairing_state = "paired"
+        self.pairing_error = None
         self.pair_count += 1
         return {"token_type": tok["token_type"], "expires_at": tok["expires_at"]}
+
+    def pairing_snapshot(self) -> dict:
+        """Redacted pairing view for UI /_sidecar/status (never includes the token)."""
+        state = self.pairing_state
+        if state == "paired" and self.expires_at:
+            try:
+                exp = datetime.strptime(self.expires_at, "%Y-%m-%dT%H:%M:%SZ").replace(
+                    tzinfo=timezone.utc)
+                if exp <= datetime.now(timezone.utc):
+                    state = "expired"
+                    self.pairing_state = "expired"
+            except ValueError:
+                pass
+        return {
+            "state": state,
+            "label": {
+                "paired": "Paired",
+                "not_paired": "Not paired",
+                "expired": "Pairing expired",
+                "failed": "Pairing failed",
+                "not_allowed": "This Mac isn't allowed",
+            }.get(state, state),
+            "expires_at": self.expires_at if state == "paired" else None,
+            "device_id": self.cfg.device_id,
+            "error": self.pairing_error,
+        }
 
     def _apply_token(self, req: PreparedRequest) -> None:
         req.headers["Authorization"] = f"Bearer {self._live_token}"
