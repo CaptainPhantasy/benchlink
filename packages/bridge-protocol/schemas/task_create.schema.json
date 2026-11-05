@@ -1,0 +1,62 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://floydslabs.local/bridge/v1/task_create.schema.json",
+  "title": "task.create",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "v",
+    "type",
+    "access_token",
+    "session_id",
+    "task_id",
+    "target_agent",
+    "goal",
+    "priority",
+    "reply_destination"
+  ],
+  "properties": {
+    "v": {
+      "const": "1"
+    },
+    "type": {
+      "const": "task.create"
+    },
+    "access_token": {
+      "type": "string",
+      "minLength": 16
+    },
+    "session_id": {
+      "$ref": "common.schema.json#/$defs/uuidLike"
+    },
+    "task_id": {
+      "$ref": "common.schema.json#/$defs/uuidLike"
+    },
+    "target_agent": {
+      "$ref": "common.schema.json#/$defs/targetAgent"
+    },
+    "goal": {
+      "type": "string",
+      "minLength": 1
+    },
+    "context_refs": {
+      "type": "array",
+      "items": {
+        "$ref": "common.schema.json#/$defs/contextRef"
+      }
+    },
+    "priority": {
+      "enum": [
+        "normal",
+        "high"
+      ]
+    },
+    "reply_destination": {
+      "enum": [
+        "bridge_status",
+        "floyd_chat",
+        "both"
+      ]
+    }
+  }
+}
