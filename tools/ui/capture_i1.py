@@ -87,7 +87,7 @@ def main():
             page.locator('#errPrimary').click(); assert page.locator('#goal').evaluate('(e)=>document.activeElement===e')
             for code,name in [('offline','W-offline'),('timeout','W-timeout'),('routing','W-routing'),('internal','W-internal'),('auth.denied','W-denied'),('auth.expired','W-expired')]:
                 show_error(code); shot(name)
-            result=result_card({'summary':'Staff task completed. The local fixture returned this report.', 'session_id':'sess_fixture', 'task_id':'task_fixture','created_at':'2026-11-05T18:05:00Z','artifact_links':['https://example.test/staff/report']},target_name='Ethan')
+            result=result_card({'summary':'Staff task completed. The local fixture returned this report.', 'session_id':'sess_fixture', 'task_id':'task_fixture','created_at':'2026-11-05T18:05:00Z','artifact_links':['https://example.test/staff/report']},target_name='Floyd')
             page.evaluate('(result)=>show({phase:"done",wait_status:"result",presentation:{result}})',result)
             page.locator('#resultDetails').evaluate('(e)=>e.open=true'); shot('W-result')
             assert page.locator('#resultSession').inner_text()=='sess_fixture'
