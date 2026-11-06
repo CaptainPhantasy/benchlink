@@ -1,0 +1,15 @@
+[project]
+name = "benchlink-mac-sidecar"
+version = "0.2.0+mvp.roundtrip"
+description = "Benchlink Mac sidecar: companion Bridge Control client beside Grok.app (contract 0.2.0-mvp)"
+requires-python = ">=3.11"
+dependencies = ["cryptography>=42"]  # Ed25519 device-key pairing (D3); rest is stdlib
+
+[project.optional-dependencies]
+smoke = ["jsonschema>=4.18"]  # schema-validates dry-run bodies in smoke; skipped if absent
+
+[project.scripts]
+benchlink-sidecar = "benchlink_sidecar.__main__:main"
+
+[tool.setuptools]
+packages = ["benchlink_sidecar"]

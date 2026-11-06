@@ -1,0 +1,35 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://floydslabs.local/bridge/v1/auth_session_token.schema.json",
+  "title": "auth.session.token",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "v",
+    "type",
+    "access_token",
+    "expires_at",
+    "token_type"
+  ],
+  "properties": {
+    "v": {
+      "const": "1"
+    },
+    "type": {
+      "const": "auth.session.token"
+    },
+    "token_type": {
+      "const": "short_lived"
+    },
+    "access_token": {
+      "type": "string",
+      "minLength": 16
+    },
+    "expires_at": {
+      "$ref": "common.schema.json#/$defs/iso8601"
+    },
+    "refresh_token": {
+      "type": "string"
+    }
+  }
+}

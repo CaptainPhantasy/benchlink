@@ -1,0 +1,94 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://floydslabs.local/bridge/v1/common.schema.json",
+  "title": "BridgeCommon",
+  "$defs": {
+    "uuidLike": {
+      "type": "string",
+      "minLength": 1,
+      "pattern": "^[A-Za-z0-9_\\-.:]+$"
+    },
+    "iso8601": {
+      "type": "string",
+      "format": "date-time"
+    },
+    "contentPart": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "type",
+        "text"
+      ],
+      "properties": {
+        "type": {
+          "const": "text"
+        },
+        "text": {
+          "type": "string",
+          "minLength": 1
+        }
+      }
+    },
+    "artifactLink": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "title",
+        "url"
+      ],
+      "properties": {
+        "title": {
+          "type": "string",
+          "minLength": 1
+        },
+        "url": {
+          "type": "string",
+          "minLength": 1
+        }
+      }
+    },
+    "contextRef": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "kind",
+        "ref"
+      ],
+      "properties": {
+        "kind": {
+          "type": "string",
+          "enum": [
+            "drive",
+            "path",
+            "url",
+            "repo"
+          ]
+        },
+        "ref": {
+          "type": "string",
+          "minLength": 1
+        }
+      }
+    },
+    "errorClass": {
+      "type": "string",
+      "enum": [
+        "auth.expired",
+        "auth.denied",
+        "auth.unpaired",
+        "session.not_found",
+        "task.not_found",
+        "validation",
+        "timeout",
+        "offline",
+        "routing",
+        "internal"
+      ]
+    },
+    "targetAgent": {
+      "description": "floyd | ethan (MVP canary) | other staff agent uuid",
+      "type": "string",
+      "minLength": 1
+    }
+  }
+}

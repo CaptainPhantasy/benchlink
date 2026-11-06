@@ -1,0 +1,35 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://floydslabs.local/bridge/v1/session_created.schema.json",
+  "title": "session.created",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "v",
+    "type",
+    "session_id",
+    "target_agent",
+    "status",
+    "created_at"
+  ],
+  "properties": {
+    "v": {
+      "const": "1"
+    },
+    "type": {
+      "const": "session.created"
+    },
+    "session_id": {
+      "$ref": "common.schema.json#/$defs/uuidLike"
+    },
+    "target_agent": {
+      "$ref": "common.schema.json#/$defs/targetAgent"
+    },
+    "status": {
+      "const": "open"
+    },
+    "created_at": {
+      "$ref": "common.schema.json#/$defs/iso8601"
+    }
+  }
+}

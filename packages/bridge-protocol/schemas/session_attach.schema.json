@@ -1,0 +1,28 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://floydslabs.local/bridge/v1/session_attach.schema.json",
+  "title": "session.attach",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "v",
+    "type",
+    "access_token",
+    "session_id"
+  ],
+  "properties": {
+    "v": {
+      "const": "1"
+    },
+    "type": {
+      "const": "session.attach"
+    },
+    "access_token": {
+      "type": "string",
+      "minLength": 16
+    },
+    "session_id": {
+      "$ref": "common.schema.json#/$defs/uuidLike"
+    }
+  }
+}

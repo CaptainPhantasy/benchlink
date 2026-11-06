@@ -1,0 +1,50 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://floydslabs.local/bridge/v1/health_pong.schema.json",
+  "title": "health.pong",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "v",
+    "type",
+    "daemon_version",
+    "uptime_s",
+    "auth",
+    "runtime",
+    "transport"
+  ],
+  "properties": {
+    "v": {
+      "const": "1"
+    },
+    "type": {
+      "const": "health.pong"
+    },
+    "daemon_version": {
+      "type": "string"
+    },
+    "uptime_s": {
+      "type": "integer",
+      "minimum": 0
+    },
+    "auth": {
+      "enum": [
+        "paired",
+        "unpaired"
+      ]
+    },
+    "runtime": {
+      "const": "inference"
+    },
+    "transport": {
+      "const": "tailscale-https"
+    },
+    "sdlc_gateway": {
+      "enum": [
+        "reachable",
+        "unreachable",
+        "n/a"
+      ]
+    }
+  }
+}

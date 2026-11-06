@@ -1,0 +1,9 @@
+[project]
+name = "benchlink-staff-adapter"
+version = "0.2.0+mvp.roundtrip"
+description = "Benchlink staff-adapter: bridge task -> staff bot (webhook|fake) -> task.result (drive_folder|local_folder|http_callback)"
+requires-python = ">=3.11"
+dependencies = []  # stdlib only
+
+[tool.setuptools]
+packages = ["benchlink_adapter"]

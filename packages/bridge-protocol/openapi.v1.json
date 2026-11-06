@@ -1,0 +1,187 @@
+{
+  "openapi": "3.1.0",
+  "info": {
+    "title": "Grok-App \u2194 Floyd Bridge API",
+    "version": "0.2.0-mvp",
+    "description": "Wire-frozen MVP contract. Transport: Tailscale HTTP(S). Runtime: inference staff parent. No Grok Build Session API."
+  },
+  "servers": [
+    {
+      "url": "https://bridge.floyds-labs.ts.net/v1",
+      "description": "Tailscale HTTPS (logical hostname; DNS TBD by Larry)"
+    },
+    {
+      "url": "http://127.0.0.1:8787/v1",
+      "description": "Local Mac stub / sidecar loopback"
+    }
+  ],
+  "paths": {
+    "/health": {
+      "get": {
+        "operationId": "health",
+        "summary": "Health probe",
+        "responses": {
+          "200": {
+            "description": "health.pong JSON body"
+          }
+        },
+        "security": [
+          {},
+          {
+            "ShortLivedBearer": []
+          }
+        ]
+      }
+    },
+    "/auth/pair": {
+      "post": {
+        "operationId": "authPair",
+        "summary": "Device pairing (Tailscale/device-bound)",
+        "responses": {
+          "200": {
+            "description": "challenge or token"
+          }
+        },
+        "security": []
+      }
+    },
+    "/sessions": {
+      "post": {
+        "operationId": "sessionCreate",
+        "summary": "Create bridged staff session",
+        "responses": {
+          "201": {
+            "description": "session.created"
+          }
+        }
+      }
+    },
+    "/sessions/{session_id}/attach": {
+      "post": {
+        "operationId": "sessionAttach",
+        "parameters": [
+          {
+            "name": "session_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "attached"
+          }
+        }
+      }
+    },
+    "/sessions/{session_id}/messages": {
+      "post": {
+        "operationId": "sessionMessage",
+        "parameters": [
+          {
+            "name": "session_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "202": {
+            "description": "accepted"
+          }
+        }
+      }
+    },
+    "/sessions/{session_id}/events": {
+      "get": {
+        "operationId": "sessionEvents",
+        "summary": "Poll/stream staff\u2192operator events for bridge status view",
+        "parameters": [
+          {
+            "name": "session_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "session.event[]"
+          }
+        }
+      }
+    },
+    "/sessions/{session_id}/close": {
+      "post": {
+        "operationId": "sessionClose",
+        "parameters": [
+          {
+            "name": "session_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "closed"
+          }
+        }
+      }
+    },
+    "/tasks": {
+      "post": {
+        "operationId": "taskCreate",
+        "summary": "Staff task (D1): Floyd or named bot; canary=Ethan",
+        "responses": {
+          "202": {
+            "description": "accepted"
+          }
+        }
+      }
+    },
+    "/tasks/{task_id}": {
+      "get": {
+        "operationId": "taskGet",
+        "parameters": [
+          {
+            "name": "task_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "task.result"
+          }
+        }
+      }
+    }
+  },
+  "components": {
+    "securitySchemes": {
+      "ShortLivedBearer": {
+        "type": "http",
+        "scheme": "bearer",
+        "bearerFormat": "short_lived",
+        "description": "Issued after Tailscale/device-bound pairing. Usable secret (Claire); never hash-only."
+      }
+    }
+  },
+  "security": [
+    {
+      "ShortLivedBearer": []
+    }
+  ]
+}

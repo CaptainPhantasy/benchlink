@@ -1,0 +1,21 @@
+# Benchlink Mac sidecar config (0.2.0-mvp). Copy to ~/.config/benchlink/sidecar.toml
+# and point BENCHLINK_SIDECAR_CONFIG at it. Env vars always win over this file.
+
+[bridge]
+# BENCHLINK_BRIDGE_BASE_URL — bridge-daemon root over Tailscale HTTPS (client appends /v1).
+# UNSET-UNTIL-PROVISIONED. Intended once Douglas clears Tailscale serve (Larry FYI; NOT live):
+#   https://inference.tail58d565.ts.net:19740
+# Do not call from Computer smoke. Demoted wrong-tailnet: bridge.floyds-labs.ts.net
+# base_url = "https://inference.tail58d565.ts.net:19740"
+base_url = ""
+
+# BENCHLINK_ACCESS_TOKEN — short-lived bearer from /auth/pair (D3). Prefer env/Vault; never commit.
+access_token = ""
+
+# BENCHLINK_ALLOW_PLACEHOLDER_HOST — only after HTTPS serve is confirmed live
+allow_placeholder_host = false
+
+[sidecar]
+# Loopback Bridge Control stub (contract: http://127.0.0.1:8787/v1). Loopback only.
+listen_host = "127.0.0.1"   # BENCHLINK_SIDECAR_LISTEN_HOST
+listen_port = 8787          # BENCHLINK_SIDECAR_LISTEN_PORT

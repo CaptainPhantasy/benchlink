@@ -1,0 +1,5 @@
+# Loose dev requirements; for reproducible installs use requirements-dev.lock (exact pins).
+jsonschema>=4.18
+referencing>=0.30
+cryptography>=42
+pytest>=8

@@ -1,0 +1,50 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://floydslabs.local/bridge/v1/session_message.schema.json",
+  "title": "session.message",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "v",
+    "type",
+    "access_token",
+    "session_id",
+    "message_id",
+    "role",
+    "content"
+  ],
+  "properties": {
+    "v": {
+      "const": "1"
+    },
+    "type": {
+      "const": "session.message"
+    },
+    "access_token": {
+      "type": "string",
+      "minLength": 16
+    },
+    "session_id": {
+      "$ref": "common.schema.json#/$defs/uuidLike"
+    },
+    "message_id": {
+      "$ref": "common.schema.json#/$defs/uuidLike"
+    },
+    "role": {
+      "const": "user"
+    },
+    "content": {
+      "type": "array",
+      "minItems": 1,
+      "items": {
+        "$ref": "common.schema.json#/$defs/contentPart"
+      }
+    },
+    "attachments": {
+      "type": "array",
+      "items": {
+        "$ref": "common.schema.json#/$defs/artifactLink"
+      }
+    }
+  }
+}

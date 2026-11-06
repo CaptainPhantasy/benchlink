@@ -1,0 +1,17 @@
+{
+  "v": "1",
+  "type": "task.create",
+  "access_token": "tok_test_0123456789ab",
+  "session_id": "sess_demo_1",
+  "task_id": "task_demo_1",
+  "target_agent": "ethan",
+  "goal": "Confirm bridge canary routing",
+  "context_refs": [
+    {
+      "kind": "drive",
+      "ref": "1MxA46KBtEXXLFuJZ39UT_YiUdKutj0DR"
+    }
+  ],
+  "priority": "normal",
+  "reply_destination": "bridge_status"
+}

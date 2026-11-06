@@ -1,0 +1,23 @@
+node_modules/
+dist/
+.env
+.env.*
+*.log
+.DS_Store
+.venv/
+!.env.example
+__pycache__/
+.quarantine/
+.pytest_cache/
+*.pyc
+# keys / credentials (D3 device keys, allowlists with real entries, any PEM)
+*.pem
+*.key
+*.p12
+device_allowlist.json
+device_ed25519*
+# local result dirs / proof logs
+results/
+benchlink-results/
+pairing-proof-*.log
+*.egg-info/

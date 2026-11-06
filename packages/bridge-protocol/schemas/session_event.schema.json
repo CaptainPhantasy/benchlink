@@ -1,0 +1,50 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://floydslabs.local/bridge/v1/session_event.schema.json",
+  "title": "session.event",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "v",
+    "type",
+    "session_id",
+    "event_id",
+    "role",
+    "agent_id",
+    "content",
+    "created_at"
+  ],
+  "properties": {
+    "v": {
+      "const": "1"
+    },
+    "type": {
+      "const": "session.event"
+    },
+    "session_id": {
+      "$ref": "common.schema.json#/$defs/uuidLike"
+    },
+    "event_id": {
+      "$ref": "common.schema.json#/$defs/uuidLike"
+    },
+    "role": {
+      "const": "assistant"
+    },
+    "agent_id": {
+      "type": "string"
+    },
+    "agent_name": {
+      "type": "string"
+    },
+    "content": {
+      "type": "array",
+      "minItems": 1,
+      "items": {
+        "$ref": "common.schema.json#/$defs/contentPart"
+      }
+    },
+    "created_at": {
+      "$ref": "common.schema.json#/$defs/iso8601"
+    }
+  }
+}
