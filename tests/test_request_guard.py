@@ -10,6 +10,23 @@ from benchlink_sidecar.config import load_config
 
 
 @pytest.fixture
+def chromium_browser():
+    """Browser checks are optional unless Playwright and Chromium are installed."""
+    sync = pytest.importorskip("playwright.sync_api")
+    with sync.sync_playwright() as playwright:
+        try:
+            browser = playwright.chromium.launch(headless=True, args=["--no-sandbox"])
+        except sync.Error as exc:
+            if "Executable doesn't exist" in str(exc):
+                pytest.skip("Chromium is unavailable; run playwright install chromium")
+            raise
+        try:
+            yield browser
+        finally:
+            browser.close()
+
+
+@pytest.fixture
 def guarded_sidecar(monkeypatch):
     calls = []
     class Phase:
@@ -25,6 +42,7 @@ def guarded_sidecar(monkeypatch):
         def end_task(self): calls.append("end")
         def retry_terminal_error(self): calls.append("retry")
         def can_resume_interrupted_wait(self): return False
+        def has_unfinished_task(self): return False
     monkeypatch.setattr(server, "BridgeControlShell", lambda *a, **kw: RecordingShell())
     monkeypatch.setattr(server.BridgeClient, "health", lambda self: (calls.append("health") or (200, {"type": "health.pong"})))
     cfg = load_config({"BENCHLINK_BRIDGE_BASE_URL": "http://127.0.0.1:9"})
@@ -87,18 +105,14 @@ def test_foreign_host_cannot_trigger_health_get(guarded_sidecar):
     assert calls == []
 
 
-def test_same_origin_browser_json_reaches_loopback(guarded_sidecar):
-    from playwright.sync_api import sync_playwright
+def test_same_origin_browser_json_reaches_loopback(guarded_sidecar, chromium_browser):
     port, calls = guarded_sidecar
     base = f"http://127.0.0.1:{port}"
-    with sync_playwright() as p:
-        browser = p.chromium.launch(headless=True, args=["--no-sandbox"])
-        page = browser.new_page()
-        page.route("**/*", lambda r: r.continue_() if r.request.url.startswith(base + "/") else r.abort())
-        page.goto(base)
-        response = page.evaluate("async () => {const r = await fetch('/_sidecar/ux/run', {method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({goal:'browser fixture'})}); return r.status}")
-        assert response == 200 and calls == ["run"]
-        browser.close()
+    page = chromium_browser.new_page()
+    page.route("**/*", lambda r: r.continue_() if r.request.url.startswith(base + "/") else r.abort())
+    page.goto(base)
+    response = page.evaluate("async () => {const r = await fetch('/_sidecar/ux/run', {method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({goal:'browser fixture'})}); return r.status}")
+    assert response == 200 and calls == ["run"]
 
 
 @pytest.mark.parametrize("name,values,expected", [
@@ -119,9 +133,8 @@ def test_duplicate_security_headers_rejected(guarded_sidecar, name, values, expe
     conn.close()
 
 
-def test_cross_origin_browser_cannot_mutate_loopback(guarded_sidecar):
+def test_cross_origin_browser_cannot_mutate_loopback(guarded_sidecar, chromium_browser):
     from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
-    from playwright.sync_api import sync_playwright
     port, calls = guarded_sidecar
     class ForeignPage(BaseHTTPRequestHandler):
         def do_GET(self):
@@ -133,11 +146,8 @@ def test_cross_origin_browser_cannot_mutate_loopback(guarded_sidecar):
     thread = threading.Thread(target=foreign.serve_forever, kwargs={"poll_interval": .01}, daemon=True)
     thread.start()
     try:
-        with sync_playwright() as p:
-            browser = p.chromium.launch(headless=True, args=["--no-sandbox"])
-            page = browser.new_page()
-            page.goto(f"http://127.0.0.1:{foreign.server_address[1]}")
-            page.evaluate("async url => {try {await fetch(url, {method:'POST',mode:'no-cors',headers:{'Content-Type':'text/plain'},body:'{\"goal\":\"untrusted browser fixture\"}'})} catch (_) {}}", f"http://127.0.0.1:{port}/_sidecar/ux/run")
-            assert calls == []
-            browser.close()
+        page = chromium_browser.new_page()
+        page.goto(f"http://127.0.0.1:{foreign.server_address[1]}")
+        page.evaluate("async url => {try {await fetch(url, {method:'POST',mode:'no-cors',headers:{'Content-Type':'text/plain'},body:'{\"goal\":\"untrusted browser fixture\"}'})} catch (_) {}}", f"http://127.0.0.1:{port}/_sidecar/ux/run")
+        assert calls == []
     finally: foreign.shutdown(); foreign.server_close(); thread.join()

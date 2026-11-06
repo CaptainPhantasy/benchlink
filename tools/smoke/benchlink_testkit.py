@@ -24,7 +24,7 @@ from benchlink_adapter.config import load_adapter_config  # noqa: E402
 from benchlink_adapter.results import InMemoryDriveClient  # noqa: E402
 from benchlink_daemon.config import load_config as load_daemon_config  # noqa: E402
 from benchlink_daemon.protocol import errors_for  # noqa: E402
-from benchlink_daemon.server import BridgeState, serve  # noqa: E402
+from benchlink_daemon.server import BridgeState, listen_url, serve  # noqa: E402
 from benchlink_sidecar.client import BridgeClient  # noqa: E402
 from benchlink_sidecar.config import load_config as load_sidecar_config  # noqa: E402
 from benchlink_sidecar.pairing import allowlist_snippet, generate_key  # noqa: E402
@@ -64,7 +64,7 @@ class Harness:
         self.srv = serve(self.daemon_cfg, state=self.state)
         threading.Thread(target=self.srv.serve_forever, kwargs={"poll_interval": 0.05}, daemon=True).start()
         host, port = self.srv.server_address[:2]
-        self.base = f"http://{host}:{port}"
+        self.base = listen_url(host, port)
         self.sidecar_cfg = load_sidecar_config({
             "BENCHLINK_BRIDGE_BASE_URL": self.base,
             "BENCHLINK_DEVICE_KEY_PATH": str(self.key_path),

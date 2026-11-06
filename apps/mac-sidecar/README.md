@@ -20,7 +20,7 @@ Precedence: **env > TOML file > default**. Copy `.env.example` or `config.exampl
 | `BENCHLINK_BRIDGE_BASE_URL` | `[bridge] base_url` | **unset** | **Primary.** bridge-daemon root; client appends `/v1`. https required unless loopback. |
 | `BENCHLINK_ACCESS_TOKEN` | `[bridge] access_token` | unset | Short-lived bearer from `/auth/pair` (D3). Redacted in all output. |
 | `BENCHLINK_ALLOW_PLACEHOLDER_HOST` | `[bridge] allow_placeholder_host` | `false` | Must be set before an unprovisioned Tailscale host may be called. |
-| `BENCHLINK_SIDECAR_LISTEN_HOST` | `[sidecar] listen_host` | `127.0.0.1` | Loopback only. |
+| `BENCHLINK_SIDECAR_LISTEN_HOST` | `[sidecar] listen_host` | `127.0.0.1` | Loopback only: `127.0.0.1`, `localhost` or `::1` (IPv6 socket). |
 | `BENCHLINK_SIDECAR_LISTEN_PORT` | `[sidecar] listen_port` | `8787` | Matches contract loopback. |
 | `BENCHLINK_SIDECAR_CONFIG` | — | unset | Path to the TOML file. |
 | `BENCHLINK_DEVICE_KEY_PATH` | `[bridge] device_key_path` | `~/.config/benchlink/device_ed25519.pem` | D3 Ed25519 device key (0600). `generate-key` / `pubkey` print only the public allowlist snippet. |

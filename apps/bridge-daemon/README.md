@@ -14,7 +14,7 @@ that host from Computer smoke (HTTPS serve not ready).
 
 | Env var | Default | Notes |
 |---|---|---|
-| `BENCHLINK_BRIDGE_LISTEN_HOST` | `127.0.0.1` | Computer smoke binds loopback |
+| `BENCHLINK_BRIDGE_LISTEN_HOST` | `127.0.0.1` | Computer smoke binds loopback; an IPv6 literal such as `::1` gets an IPv6 socket and bracketed URLs |
 | `BENCHLINK_BRIDGE_LISTEN_PORT` | `8790` | Avoids sidecar `8787`; rejects `63301` |
 | `BENCHLINK_BRIDGE_PUBLIC_BASE_URL` | **unset** | Intended: `https://inference.tail58d565.ts.net:19740` (Larry; unset until Douglas clears serve). Refused unless `BENCHLINK_ALLOW_PLACEHOLDER_HOST=1`. Demoted: `bridge.floyds-labs.ts.net`. |
 | `BENCHLINK_ALLOW_PLACEHOLDER_HOST` | `false` | Same policy as mac-sidecar |
