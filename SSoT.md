@@ -38,7 +38,7 @@ Precedence: env > TOML (`BENCHLINK_SIDECAR_CONFIG`) > default. Examples: `apps/m
 | `BENCHLINK_BRIDGE_BASE_URL` | `[bridge] base_url` | **unset** | **Primary.** bridge-daemon root; client appends `/v1`. https unless loopback. Port 63301 (Build Session API) rejected. |
 | `BENCHLINK_ACCESS_TOKEN` | `[bridge] access_token` | unset | Short-lived bearer (D3); always redacted. |
 | `BENCHLINK_ALLOW_PLACEHOLDER_HOST` | `[bridge] allow_placeholder_host` | `false` | Gate for calling an unprovisioned Tailscale host. |
-| `BENCHLINK_SIDECAR_LISTEN_HOST` | `[sidecar] listen_host` | `127.0.0.1` | Loopback only. |
+| `BENCHLINK_SIDECAR_LISTEN_HOST` | `[sidecar] listen_host` | `127.0.0.1` | Loopback only: `127.0.0.1`, `localhost` or `::1` (IPv6 socket). |
 | `BENCHLINK_SIDECAR_LISTEN_PORT` | `[sidecar] listen_port` | `8787` | Contract loopback `http://127.0.0.1:8787/v1`. |
 | `BENCHLINK_SIDECAR_CONFIG` | — | unset | Path to TOML file. |
 
@@ -49,7 +49,7 @@ Edit home: Computer. Runtime later: `/srv/organized/floyds-labs-staff/grok-app-f
 
 | Env var | Default | Notes |
 |---------|---------|-------|
-| `BENCHLINK_BRIDGE_LISTEN_HOST` | `127.0.0.1` | Computer smoke binds loopback |
+| `BENCHLINK_BRIDGE_LISTEN_HOST` | `127.0.0.1` | Computer smoke binds loopback; an IPv6 literal such as `::1` gets an IPv6 socket and bracketed URLs |
 | `BENCHLINK_BRIDGE_LISTEN_PORT` | `8790` | Avoids sidecar `8787`; rejects `63301` |
 | `BENCHLINK_BRIDGE_PUBLIC_BASE_URL` | **unset** | Intended: `https://inference.tail58d565.ts.net:19740` (unset until serve live) |
 | `BENCHLINK_ALLOW_PLACEHOLDER_HOST` | `false` | Same placeholder policy as sidecar |
@@ -62,7 +62,7 @@ Edit home: Computer. Runtime later: `/srv/organized/floyds-labs-staff/grok-app-f
 | `BENCHLINK_TARGET_<KEY>_WEBHOOK_URL` | unset | Routine webhook per target (FLOYD default, ETHAN canary); unset → `offline` |
 | `BENCHLINK_TARGET_<KEY>_SENDER_KEY` | unset | Routine sender key (secret; inference env only) |
 | `BENCHLINK_WEBHOOK_SENDER_KEY_HEADER` / `_SCHEME` | `Authorization` / `Bearer` | **TBD** routine sender-key convention |
-| `BENCHLINK_WEBHOOK_TIMEOUT_S` | `10` | Dispatch timeout → `timeout` |
+| `BENCHLINK_WEBHOOK_TIMEOUT_S` | `10` | Dispatch timeout → `timeout`; if the request may already have been delivered (response timeout, webhook 408/5xx except 501/505, dropped connection), the task stays `accepted` until a result or `BENCHLINK_TASK_TIMEOUT_S` |
 | `BENCHLINK_TASK_TIMEOUT_S` | `600` | No final result → `task.result{failed, timeout}` |
 | `BENCHLINK_RESULT_SOURCE` | `drive_folder` | `drive_folder` \| `local_folder` \| `http_callback` (GM: Drive fallback default) |
 | `BENCHLINK_RESULTS_DRIVE_FOLDER_ID` | unset | Bot writes `<task_id>.json`; unset → `offline` |

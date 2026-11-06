@@ -85,11 +85,12 @@ def main(argv: list[str] | None = None) -> int:
         goal = " ".join(argv[1:]).strip() or None
         return run_cli_demo(cfg, goal)
     if cmd == "serve":
-        from .server import serve
+        from .server import listen_url, serve
         srv = serve(cfg)
-        print(f"benchlink mac-sidecar listening on http://{cfg.listen_host}:{cfg.listen_port}/v1 "
+        url = listen_url(cfg.listen_host, cfg.listen_port)
+        print(f"benchlink mac-sidecar listening on {url}/v1 "
               f"(upstream {'configured' if cfg.upstream_configured else 'UNSET — /v1/health returns 503'}); "
-              f"Bridge Control UI at http://{cfg.listen_host}:{cfg.listen_port}/")
+              f"Bridge Control UI at {url}/")
         try:
             srv.serve_forever()
         except KeyboardInterrupt:

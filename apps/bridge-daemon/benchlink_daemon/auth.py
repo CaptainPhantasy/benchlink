@@ -156,7 +156,10 @@ class AuthService:
                 pub.verify(sig, signing_input(ch["challenge"], ch["nonce"]))
             except (InvalidSignature, ValueError, binascii.Error):
                 raise BridgeError("auth.denied", "proof signature invalid") from None
-            allowed = set(entry.get("scopes") or ALL_SCOPES)
+            configured = entry.get("scopes", ALL_SCOPES)
+            if not isinstance(configured, (list, tuple)) or not all(isinstance(s, str) for s in configured):
+                raise BridgeError("auth.denied", "device scope allowlist must be a list of scope names")
+            allowed = set(configured)  # an explicit [] grants nothing; only omission uses defaults
             granted = tuple(s for s in ALL_SCOPES if s in set(body["scopes"]) and s in allowed)
             if not granted:
                 raise BridgeError("auth.denied", "none of the requested scopes are allowed for this device")
