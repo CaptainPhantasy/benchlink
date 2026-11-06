@@ -23,6 +23,7 @@ from typing import Callable
 
 from .task_result import ERROR_CODES, is_task_result
 from .client import AuthNotPaired, BridgeClient, PreparedRequest, RequestTimeout, UnacknowledgedDispatch, _is_frozen_error
+from .ui.copy import error_card, result_card, status_token
 from .config import ConfigError, SidecarConfig, describe
 
 # Soft-lock constants (must stay true for MVP shell)
@@ -470,7 +471,7 @@ class BridgeControlShell:
             self.resume_interrupted_wait()
             return
         if self.phase == Phase.WAIT:
-            raise RuntimeError("Completion is not confirmed; poll the original task.")
+            raise TaskInFlight("Completion is not confirmed; poll the original task.")
         if self.phase != Phase.ERROR:
             return
         target, goal, high_priority = self.target_key, self.goal, self.high_priority
@@ -478,6 +479,21 @@ class BridgeControlShell:
         self.target_key, self.goal, self.high_priority = target, goal, high_priority
 
     def snapshot(self) -> dict:
+        entry = next((e for e in ROSTER if e.key == self.target_key), None)
+        target_name = entry.display if entry else self.target_key
+        presentation = {"status": status_token(self.wait_status.value)}
+        if self.result and self.wait_status == WaitStatus.RESULT:
+            presentation["result"] = result_card(self.result, target_name=target_name)
+        if self.error:
+            preview = bool(self.dry_run_mode and (self.error.get("code") == "offline"))
+            presentation["error"] = error_card(
+                self.error.get("code"),
+                target_name=target_name,
+                device_id=getattr(self.cfg, "device_id", None),
+                correlation_id=self.error.get("correlation_id"),
+                http=self.error.get("http"),
+                preview=preview,
+            )
         return {
             "phase": self.phase.value,
             "target": self.target_key,
@@ -494,6 +510,7 @@ class BridgeControlShell:
             "offline_banner": self.offline_banner,
             "result": self.result,
             "error": self.error,
+            "presentation": presentation,
             "soft_locks": self.soft_locks(),
             "config": describe(self.cfg),
             "roster": self.roster(),
