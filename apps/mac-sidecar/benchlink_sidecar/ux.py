@@ -49,19 +49,20 @@ class RosterEntry:
 
 # S2 static roster — Floyd default
 ROSTER: tuple[RosterEntry, ...] = (
-    RosterEntry("floyd", "Floyd · General Manager", "default router", "recommended", FLOYD_ID),
-    RosterEntry("ethan", "Ethan · Product", "canary", "canary", ETHAN_ID),
-    RosterEntry("amir", "Amir", "Design Lead", "leads", None),
-    RosterEntry("sofia", "Sofia", "Full-Stack", "leads", None),
-    RosterEntry("larry", "Larry", "Platform", "leads", None),
-    RosterEntry("claire", "Claire", "Ops/Secrets", "leads", None),
-    RosterEntry("maya", "Maya", "Staff", "leads", None),
-    RosterEntry("grace", "Grace", "Staff", "leads", None),
+    RosterEntry("floyd", "Floyd · General Manager", "General Manager", "recommended", FLOYD_ID),
+    RosterEntry("ethan", "Ethan · Product", "Product", "canary", ETHAN_ID),
+    RosterEntry("amir", "Amir · Design", "Design", "leads", None),
+    RosterEntry("sofia", "Sofia · Full-Stack", "Full-Stack", "leads", None),
+    RosterEntry("larry", "Larry · Delivery", "Delivery", "leads", None),
+    RosterEntry("claire", "Claire · Ops", "Ops", "leads", None),
+    RosterEntry("maya", "Maya · Marketing", "Marketing", "leads", None),
+    RosterEntry("grace", "Grace · Client Success", "Client Success", "leads", None),
 )
 DEFAULT_TARGET = "floyd"
 
 
 class TaskInFlight(RuntimeError):
+    """The current task must be explicitly ended before another dispatch."""
     """An existing/possibly accepted task requires End or same-ID recovery."""
 
 
@@ -163,6 +164,8 @@ class BridgeControlShell:
 
     def pick(self, target_key: str = DEFAULT_TARGET) -> None:
         """Phase 1: Pick target. O1: only allowed from PICK / DONE / ERROR (not mid-WAIT)."""
+        if self.phase == Phase.WAIT and O1_NO_MID_TASK_HANDOFF:
+            raise TaskInFlight("O1: mid-task handoff forbidden; End task first, then re-pick")
         if self.has_unfinished_task() and O1_NO_MID_TASK_HANDOFF:
             raise TaskInFlight("O1: completion is not confirmed; Retry checks the original task")
         keys = {e.key for e in ROSTER}
@@ -194,6 +197,7 @@ class BridgeControlShell:
         if self.phase not in {Phase.COMPOSE, Phase.PICK}:
             # Allow re-compose only before send; after send must End first (O1)
             if self.phase == Phase.WAIT and O1_NO_MID_TASK_HANDOFF:
+                raise TaskInFlight("O1: cannot recompose mid-wait; End task first")
                 raise TaskInFlight("O1: completion is not confirmed; Retry checks the original task")
         if self.phase == Phase.PICK:
             self.pick(self.target_key)
@@ -519,6 +523,8 @@ class BridgeControlShell:
     def start_and_wait(self, goal: str, target_key: str = DEFAULT_TARGET,
                        high_priority: bool = False, max_ticks: int | None = None) -> dict:
         """Pick → Compose → Send → Wait (bounded); leaves state for later polls / End."""
+        if self.phase == Phase.WAIT:
+            raise TaskInFlight("O1: a task is in flight; End task first")
         if self.has_unfinished_task():
             raise TaskInFlight("O1: completion is not confirmed; Retry checks the original task")
         self.pick(target_key)

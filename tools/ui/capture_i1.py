@@ -94,7 +94,7 @@ def main():
         elif gate=='02':
             page.locator('#goal').fill(''); shot('P-default'); shot('C-empty')
             first=page.locator('[role=radio]').first; first.focus(); page.keyboard.press('ArrowDown')
-            assert page.locator('[role=radio][aria-checked=true]').inner_text().startswith('✓ Ethan')
+            assert page.locator('[role=radio][aria-checked=true]').inner_text().strip().startswith('Ethan')
             assert page.locator('[role=radio][tabindex="0"]').count()==1
             shot('P-selected'); mode['run']='wait'; page.locator('#goal').fill('Keep this task in flight')
             page.evaluate('document.getElementById("send").click(); document.getElementById("send").click()')
