@@ -14,6 +14,7 @@ Everything else -> 404 error envelope.
 from __future__ import annotations
 
 import json
+import socket
 import threading
 import uuid
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -22,8 +23,15 @@ from . import CONTRACT_VERSION, __version__
 from .client import BridgeClient
 from .config import ConfigError, SidecarConfig, describe
 from .ui.copy import TASK_IN_FLIGHT_BODY, copy_tables_for_html, error_card
+from .ui.copy import copy_tables_for_html, error_card
 from .ux import DEFAULT_TARGET, ROSTER, BridgeControlShell, TaskInFlight
 from .request_guard import request_denial
+
+
+def task_in_flight_error() -> dict:
+    env = error_envelope("validation", "Completion is not confirmed; Retry checks the original task", False)
+    env["presentation"] = {"error": error_card("task_in_flight")}
+    return env
 
 
 def error_envelope(code: str, message: str, retryable: bool) -> dict:
@@ -66,6 +74,7 @@ HTML_SHELL = """<!DOCTYPE html>
   <p id="sendHint" class="muted"></p>
   <button id="send" aria-describedby="sendHint" disabled>Send task</button>
   <div id="inflightNotice" class="banner" role="alert" style="display:none"><strong>Task in progress</strong><p>A task is in flight. End task first, then pick a target and send again.</p><button id="noticeEnd">End task</button></div>
+  <button id="send" disabled>Send task</button>
 </div>
 <div class="card" id="wait">
   <strong id="statusHeading" tabindex="-1">3 · Status</strong>
@@ -101,8 +110,10 @@ const banner = $('banner');
 if (offline) { banner.style.display='block'; banner.textContent = "Preview mode. The bridge address isn't set on this Mac."; }
 const rost = $('roster');
 let target = '__DEFAULT__';
-let recovering = false;
-let inflight = false, sending = false, lastSnapshot = {}, lastSent = null, viewKey = '';
+let recovering = false, busy = false, loaded = false, localFailure = false;
+let requestUncertain = false, ownedSnapshot = null, timer = null;
+let lastSnapshot = {}, lastSent = null, viewKey = '';
+function pending() { return requestUncertain || lastSnapshot.task_in_flight===true || ownedSnapshot!==null; }
 const HELP_URL = 'https://github.com/CaptainPhantasy/benchlink/blob/main/docs/PAIRING_PROOF_RUNBOOK.md';
 function displayName(key) { return (roster.find(x => x.key === key) || {}).display || key; }
 function selectTarget(key, focus=false) {
@@ -134,6 +145,12 @@ function renderRoster() {
       event.preventDefault(); selectTarget(roster[index].key,true);
     };
     if (e.group==='leads') leads.appendChild(b); else rost.appendChild(b);
+  rost.innerHTML = '';
+  roster.forEach(e => {
+    const b = document.createElement('button'); b.type = 'button';
+    b.textContent = e.display + (e.default ? ' (default)' : '');
+    b.onclick = () => { if (!busy && !recovering && !pending()) { target=e.key; $('targetLabel').textContent=e.display; } };
+    rost.appendChild(b);
   });
   rost.appendChild(leadCaption); rost.appendChild(leads);
   $('rosterLock').hidden=!inflight;
@@ -142,6 +159,12 @@ function updateSendEnabled() {
   $('send').disabled=recovering || sending || inflight || !$('goal').value.trim();
   $('sendHint').textContent=inflight ? 'A task is in flight. End task first, then pick a target and send again.' : '';
   $('goal').readOnly=inflight; $('hp').disabled=inflight;
+}
+function updateSendEnabled() {
+  const locked = !loaded || recovering || busy || pending();
+  $('send').disabled = locked || !$('goal').value.trim();
+  $('end').disabled = locked;
+  document.querySelectorAll('#roster button').forEach(b=>b.disabled=locked);
 }
 function fallbackError(j) {
   const t = COPY.errors[j.code] || COPY.errors.internal;
@@ -164,54 +187,71 @@ async function post(path, body) {
   const r=await fetch(path, {method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify(body || {})});
   return {r, j:await r.json()};
 }
+function schedule() {
+  clearTimeout(timer);
+  if (loaded && !localFailure && lastSnapshot.phase==='wait') timer=setTimeout(retryPoll,2000);
+}
+async function action(kind, body={}, recoverySequence=false) {
+  if (!loaded || busy) return false;
+  if (kind==='run' && (pending() || (recovering && !recoverySequence))) return false;
+  if (kind==='retry' && pending()) kind='poll';
+  if (kind==='run') requestUncertain=true;
+  busy=true; updateSendEnabled();
+  try {
+    const {r,j}=await post('/_sidecar/ux/'+kind,body);
+    if (!r.ok) {
+      // A conflict can belong to another window. Only a snapshot can release it.
+      if (r.status===409) requestUncertain=true;
+      showError(j); return false;
+    }
+    show(j.snapshot || j);
+    if (kind==='run' && lastSnapshot.phase==='wait') $('statusHeading').focus();
+    return true;
+  } catch (e) { showError({code:'offline'}); return false; }
+  finally { busy=false; updateSendEnabled(); schedule(); }
+}
 async function endTask(clear=true) {
   const {r,j}=await post('/_sidecar/ux/end');
   if (!r.ok) { showError(j); return false; }
   $('inflightNotice').style.display='none'; show(j);
   if (clear) { $('goal').value=''; $('hp').checked=false; }
   updateSendEnabled(); $('goal').focus(); return true;
+  if (recovering || busy || pending()) return false;
+  const ended=await action('end');
+  if (ended && clear) { $('goal').value=''; $('hp').checked=false; }
+  updateSendEnabled(); if (ended) $('goal').focus(); return ended;
 }
 async function retryPoll() {
-  try { const {r,j}=await post('/_sidecar/ux/poll'); if (!r.ok) showError(j); else show(j); }
-  catch (e) { showError({code:'offline'}); }
+  if (recovering || busy) return;
+  return action('poll');
 }
 async function retryTerminal() {
-  if (recovering || sending || inflight) return;
+  if (recovering || busy) return;
   recovering=true; updateSendEnabled();
-  try {
-    const {r,j}=await post('/_sidecar/ux/retry');
-    if (!r.ok) {
-      showError(j);
-      if (r.status===409) { inflight=true; renderRoster(); updateSendEnabled(); }
-      return;
-    }
-    // The server keeps the draft and never dispatches here. Send remains explicit.
-    target=j.target || target; $('targetLabel').textContent=displayName(target);
-    $('goal').value=j.goal || ''; $('hp').checked=!!j.high_priority;
-    show(j); renderRoster();
-  } catch (e) { showError({code:'offline'}); }
+  try { return await action('retry'); }
   finally { recovering=false; updateSendEnabled(); }
 }
 async function retryTask() {
-  if (recovering || sending || inflight) return;
-  if (lastSnapshot.phase==='error') return retryTerminal();
-  return retryPoll();
+  if (recovering || busy) return;
+  if (!loaded) return bootstrap();
+  if (pending() || localFailure) return retryPoll();
+  return retryTerminal();
 }
 async function resend(toFloyd=false) {
+  if (recovering || busy || pending() || !loaded) return;
+  // Own the entire End-and-Send sequence before the first asynchronous request.
+  recovering=true; updateSendEnabled();
   const saved = lastSent || {goal:$('goal').value, target, high_priority:$('hp').checked};
-  if (!await endTask(false)) return;
-  target=toFloyd ? 'floyd' : saved.target; $('targetLabel').textContent=displayName(target);
-  $('goal').value=saved.goal; $('hp').checked=saved.high_priority; renderRoster(); await sendTask();
+  try {
+    if (!await action('end')) return;
+    target=toFloyd ? 'floyd' : saved.target; $('targetLabel').textContent=displayName(target);
+    $('goal').value=saved.goal; $('hp').checked=saved.high_priority; renderRoster();
+    lastSent={...saved,target};
+    await action('run',{...lastSent,max_ticks:1},true);
+  } finally { recovering=false; updateSendEnabled(); }
 }
 const actions = {
-  'Retry': async () => {
-    // A known terminal result is task recovery, not a connection-only retry.
-    if (lastSnapshot.phase==='error' && (lastSnapshot.result || {}).status==='failed') return retryTerminal();
-    if (((lastSnapshot.presentation || {}).error || {}).details_code === 'offline') {
-      try { const r=await fetch('/v1/health'); if (!r.ok) showError({code:'offline'}); else banner.style.display='none'; }
-      catch (e) { showError({code:'offline'}); }
-    } else await retryTask();
-  },
+  'Retry': () => retryTask(),
   'End task': () => endTask(), 'New task': () => endTask(),
   'Edit task': () => { $('goal').readOnly=false; $('goal').focus(); },
   'Send again': () => resend(), 'Send to Floyd': () => resend(true),
@@ -227,11 +267,28 @@ function wireAction(button, label) {
   button.textContent = label || '';
   button.onclick = actions[label] ? () => Promise.resolve(actions[label](button)).catch(()=>showError({code:'offline'})) : null;
 }
-function showError(j) { show({phase:'error', wait_status:'error', error:{code:j.code}, presentation:{status:COPY.status.error, error:(j.presentation || {}).error || fallbackError(j)}}); }
+function showError(j) {
+  // Presentation failures must not erase the original task's ownership or IDs.
+  localFailure=true;
+  renderSnapshot({phase:'error', wait_status:'error', error:{code:j.code},
+    presentation:{status:COPY.status.error, error:(j.presentation || {}).error || fallbackError(j)}});
+  updateSendEnabled();
+}
 function show(snap) {
+  if (!snap || typeof snap.task_in_flight!=='boolean') throw new Error('Task ownership unavailable');
   lastSnapshot=snap;
+  if (snap.task_in_flight) ownedSnapshot={...snap};
+  else { ownedSnapshot=null; requestUncertain=false; }
+  localFailure=false;
+  if (snap.phase==='pick' || snap.phase==='compose') {
+    $('goal').value=snap.goal || ''; $('hp').checked=!!snap.high_priority;
+  }
+  if (snap.target) { target=snap.target; $('targetLabel').textContent=displayName(target); }
+  renderSnapshot(snap); updateSendEnabled();
+}
+function renderSnapshot(snap) {
   const pres=snap.presentation || {}, st=pres.status || COPY.status[snap.wait_status] || COPY.status.idle;
-  const key=JSON.stringify([snap.phase,snap.wait_status,snap.task_id,pres.error]);
+  const key=JSON.stringify([snap.phase,snap.wait_status,snap.task_id,pres.error,pending()]);
   const changed=key!==viewKey; viewKey=key;
   const pill=$('statusPill'); pill.textContent=st.label; pill.className='pill '+(st.tone || 'neutral');
   inflight=snap.phase==='wait'; renderRoster(); updateSendEnabled();
@@ -254,7 +311,11 @@ function show(snap) {
     if (changed) $('resultSummary').focus();
   }
   if ((pres.error || snap.error) && changed) {
-    const err=pres.error || fallbackError(snap.error || {});
+    let err=pres.error || fallbackError(snap.error || {});
+    if (pending()) {
+      err={...err, body:'Completion is not confirmed. Retry checks the original task; sending stays locked.',
+        primary:'Retry', secondary:'Details'};
+    }
     $('errTitle').textContent=err.title; $('errBody').textContent=err.body;
     for (const [id,value] of [['errCode',err.details_code],['errHttp',err.http],['errCorr',err.correlation_id]]) {
       $(id).textContent=value == null ? '' : value; $(id+'Row').hidden=value == null || value==='';
@@ -281,6 +342,11 @@ async function sendTask() {
     }
   } catch (e) { showError({code:'offline'}); }
   finally { sending=false; $('send').textContent='Send task'; updateSendEnabled(); }
+  const goal=$('goal').value.trim(); if (!goal || recovering || busy || pending() || !loaded) return;
+  lastSent={target,goal,high_priority:$('hp').checked};
+  $('send').textContent='Sending';
+  try { await action('run',{...lastSent,max_ticks:1}); }
+  finally { $('send').textContent='Send task'; updateSendEnabled(); }
 }
 function showInflight() { $('inflightNotice').style.display='block'; $('noticeEnd').focus(); }
 $('noticeEnd').onclick=()=>endTask().catch(()=>showError({code:'offline'}));
@@ -290,7 +356,18 @@ $('goal').addEventListener('input',updateSendEnabled);
 $('copySession').onclick=()=>copyText($('copySession'),$('resultSession').textContent);
 $('copyTask').onclick=()=>copyText($('copyTask'),$('resultTask').textContent);
 $('copyCorr').onclick=()=>copyText($('copyCorr'),$('errCorr').textContent);
-$('targetLabel').textContent=displayName(target); renderRoster(); updateSendEnabled();
+async function bootstrap() {
+  if (busy) return;
+  busy=true; updateSendEnabled();
+  try {
+    const r=await fetch('/_sidecar/ux');
+    if (!r.ok) throw new Error('Task status unavailable');
+    show(await r.json()); loaded=true;
+  } catch (e) { showError({code:'offline'}); }
+  finally { busy=false; }
+  updateSendEnabled(); schedule();
+}
+$('targetLabel').textContent=displayName(target); renderRoster(); updateSendEnabled(); bootstrap();
 </script></body></html>
 """
 
@@ -304,8 +381,8 @@ def make_handler(cfg: SidecarConfig):
     class Handler(BaseHTTPRequestHandler):
         server_version = f"benchlink-mac-sidecar/{__version__}"
 
-        def _json(self, status: int, payload: dict):
-            body = json.dumps(payload).encode()
+        def _json(self, status: int, payload: dict | bytes):
+            body = payload if isinstance(payload, bytes) else json.dumps(payload).encode()
             self.send_response(status)
             self.send_header("Content-Type", "application/json")
             self.send_header("Content-Length", str(len(body)))
@@ -364,8 +441,37 @@ def make_handler(cfg: SidecarConfig):
                                         "config": describe(cfg),
                                         "roster_keys": [e.key for e in ROSTER]})
             if path == "/_sidecar/ux":
-                return self._json(200, BridgeControlShell(cfg).snapshot())
+                with run_lock:
+                    body = json.dumps(live["shell"].snapshot()).encode()
+                return self._json(200, body)
             return self._json(404, error_envelope("validation", f"no route {path}", False))
+
+        def _task_response(self, path):
+            shell = live["shell"]
+            if path == "/_sidecar/ux/run":
+                if shell.has_unfinished_task():
+                    return 409, task_in_flight_error()
+                body = self._read_json()
+                goal = str(body.get("goal") or "").strip()
+                if not goal:
+                    return 422, error_envelope("validation", "Compose a non-empty task", False)
+                if shell.phase.value in {"done", "error"}:
+                    shell.end_task()
+                out = shell.start_and_wait(goal=goal,
+                    target_key=str(body.get("target") or DEFAULT_TARGET),
+                    high_priority=bool(body.get("high_priority")),
+                    max_ticks=int(body.get("max_ticks") or 2))
+                return 200, {"snapshot": out["snapshot"], "send": {"mode": out.get("send", {}).get("mode")}}
+            if path == "/_sidecar/ux/end":
+                shell.end_task()  # same central guard: End is NOT cancellation
+            elif path == "/_sidecar/ux/retry":
+                shell.retry_terminal_error()
+            elif path == "/_sidecar/ux/poll":
+                if shell.can_resume_interrupted_wait():
+                    shell.resume_interrupted_wait()
+                elif shell.phase.value == "wait":
+                    shell.wait_once()
+            return 200, shell.snapshot()
 
         def do_POST(self):  # noqa: N802
             if not self._allow_request(mutation=True):
@@ -431,25 +537,23 @@ def make_handler(cfg: SidecarConfig):
                     env = error_envelope("validation", "Task in progress", False)
                     env["presentation"] = {"error": error_card("task_in_flight")}
                     return self._json(409, env)
+            if path not in {"/_sidecar/ux/run", "/_sidecar/ux/poll", "/_sidecar/ux/retry", "/_sidecar/ux/end"}:
+                return self._json(404, error_envelope("validation", f"no route {path}", False))
+            if not run_lock.acquire(blocking=False):
+                return self._json(409, task_in_flight_error())
+            try:
                 try:
-                    shell = live["shell"]
-                    if shell.phase.value == "wait":
-                        env = error_envelope("validation", "Task in progress", False)
-                        env["presentation"] = {"error": error_card("task_in_flight")}
-                        return self._json(409, env)
-                    shell.retry_terminal_error()
-                    return self._json(200, shell.snapshot())
-                finally:
-                    run_lock.release()
-            if path == "/_sidecar/ux/poll":
-                shell = live["shell"]
-                if shell.phase.value == "wait":
-                    shell.wait_once()
-                return self._json(200, shell.snapshot())
-            if path == "/_sidecar/ux/end":
-                live["shell"].end_task()
-                return self._json(200, live["shell"].snapshot())
-            return self._json(404, error_envelope("validation", f"no route {path}", False))
+                    status, payload = self._task_response(path)
+                except TaskInFlight:
+                    status, payload = 409, task_in_flight_error()
+                except (ValueError, RuntimeError):
+                    status, payload = 422, error_envelope("validation", "Task operation rejected", False)
+                except Exception:
+                    status, payload = 500, error_envelope("internal", "Bridge operation failed", False)
+                body = json.dumps(payload).encode()  # freeze under lock, not during response transport
+            finally:
+                run_lock.release()
+            return self._json(status, body)
 
         def log_message(self, fmt, *args):
             pass
@@ -457,5 +561,16 @@ def make_handler(cfg: SidecarConfig):
     return Handler
 
 
+class _IPv6ThreadingHTTPServer(ThreadingHTTPServer):
+    address_family = socket.AF_INET6
+
+
 def serve(cfg: SidecarConfig) -> ThreadingHTTPServer:
-    return ThreadingHTTPServer((cfg.listen_host, cfg.listen_port), make_handler(cfg))
+    # config accepts only 127.0.0.1, localhost and ::1; ::1 needs an AF_INET6 socket.
+    cls = _IPv6ThreadingHTTPServer if ":" in cfg.listen_host else ThreadingHTTPServer
+    return cls((cfg.listen_host, cfg.listen_port), make_handler(cfg))
+
+
+def listen_url(host: str, port: int) -> str:
+    """Browser URL for a listen address; IPv6 literals need brackets."""
+    return f"http://[{host}]:{port}" if ":" in host else f"http://{host}:{port}"

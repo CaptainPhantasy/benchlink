@@ -18,12 +18,17 @@ or is the unprovisioned placeholder.
 from __future__ import annotations
 
 import json
+import re
+import socket
+import uuid
 import urllib.error
 import urllib.request
 from dataclasses import dataclass, field
 from urllib.parse import quote
 
 from .config import ConfigError, SidecarConfig
+from .http_transport import open_no_redirects
+from .task_result import is_task_result
 
 DRY_RUN_BASE = "{BENCHLINK_BRIDGE_BASE_URL}/v1"
 REDACTED = "<redacted>"
@@ -54,10 +59,42 @@ class AuthNotPaired(ConfigError):
     """No bearer available and no device key to pair with (maps to auth.unpaired)."""
 
 
+class RequestTimeout(TimeoutError):
+    """A local RPC deadline, not proof the submitted task failed upstream."""
+    def __init__(self, operation_id: str, seconds: float):
+        self.operation_id = operation_id
+        super().__init__(f"Bridge {operation_id} reply exceeded {seconds:g}s")
+
+class UnacknowledgedDispatch(OSError):
+    """An untyped gateway failure cannot prove task.create was rejected."""
+    def __init__(self, http_status: int, code: str):
+        self.http_status, self.code = http_status, code
+        super().__init__(f"Task acknowledgement unavailable (HTTP {http_status}); task may exist")
+
+def _is_frozen_error(body) -> bool:
+    """Validate the complete 0.2.0-mvp error envelope before trusting rejection.
+
+    Stdlib mirror of error.schema.json/common.schema.json; contract-oracle tests
+    exercise required/extra fields, types and every frozen error class.
+    A proxy's partial/unknown body is NOT proof that task.create was rejected.
+    """
+    fields = {"v", "type", "code", "message", "retryable", "correlation_id"}
+    codes = {"auth.expired", "auth.denied", "auth.unpaired", "session.not_found",
+             "task.not_found", "validation", "timeout", "offline", "routing", "internal"}
+    return bool(isinstance(body, dict) and set(body) == fields
+                and body["v"] == "1" and body["type"] == "error"
+                and isinstance(body["code"], str) and body["code"] in codes
+                and isinstance(body["message"], str) and isinstance(body["retryable"], bool)
+                and isinstance(body["correlation_id"], str)
+                and re.search(r"^[A-Za-z0-9_\-.:]+$", body["correlation_id"]))
+
+
 class BridgeClient:
-    def __init__(self, cfg: SidecarConfig, timeout: float = 5.0):
+    def __init__(self, cfg: SidecarConfig, timeout: float = 5.0, dispatch_timeout: float = 15.0):
         self.cfg = cfg
         self.timeout = timeout
+        # Default webhook dispatch is synchronous up to 10s; leave reply margin.
+        self.dispatch_timeout = dispatch_timeout
         self._live_token: str | None = cfg.access_token
         self.pair_count = 0
 
@@ -215,7 +252,7 @@ class BridgeClient:
             self._apply_token(req)
         status, body = self._raw_send(req)
         # re-pair ONCE on auth.expired / auth.unpaired (no refresh token in MVP)
-        if (needs_auth and status == 401 and isinstance(body, dict)
+        if (needs_auth and req.operation_id != "taskCreate" and status == 401 and isinstance(body, dict)
                 and body.get("code") in {"auth.expired", "auth.unpaired"} and self.can_pair()):
             err = self._pair_or_error()
             if err:
@@ -237,15 +274,49 @@ class BridgeClient:
     def _raw_send(self, req: PreparedRequest):
         data = json.dumps(req.body).encode() if req.body is not None else None
         r = urllib.request.Request(req.url, data=data, method=req.method, headers=req.headers)
+        budget = max(self.timeout, self.dispatch_timeout) if req.operation_id == "taskCreate" else self.timeout
         try:
-            with urllib.request.urlopen(r, timeout=self.timeout) as resp:
+            with open_no_redirects(r, timeout=budget) as resp:
                 raw = resp.read() or b"{}"
-                return resp.status, json.loads(raw)
+                try:
+                    body = json.loads(raw)
+                except ValueError:
+                    if req.operation_id == "taskCreate":
+                        raise UnacknowledgedDispatch(502, "offline") from None
+                    raise
+                if req.operation_id == "taskCreate" and (
+                        not 200 <= resp.status < 300 or not is_task_result(body)
+                        or body.get("task_id") != (req.body or {}).get("task_id")
+                        or body.get("session_id") != (req.body or {}).get("session_id")):
+                    raise UnacknowledgedDispatch(502, "offline")
+                return resp.status, body
         except urllib.error.HTTPError as e:
             try:
-                return e.code, json.loads(e.read() or b"{}")
+                body = json.loads(e.read() or b"{}")
             except ValueError:
-                return e.code, {}
+                body = {}
+            except (TimeoutError, socket.timeout):
+                raise RequestTimeout(req.operation_id, budget) from None
+            except urllib.error.URLError as body_error:
+                if isinstance(body_error.reason, (TimeoutError, socket.timeout)):
+                    raise RequestTimeout(req.operation_id, budget) from None
+                raise
+            if _is_frozen_error(body):
+                return e.code, body
+            code = "timeout" if e.code in {408, 504} else "offline" if e.code >= 500 and e.code != 501 else "internal"
+            if req.operation_id == "taskCreate":
+                # Any malformed rejection, regardless of status, may have lost
+                # an accepted dispatch. Never make a fresh POST from this state.
+                raise UnacknowledgedDispatch(e.code, "timeout" if e.code in {408, 504} else "offline") from None
+            return e.code, {"v": "1", "type": "error", "code": code,
+                            "message": "Bridge request failed without an error envelope",
+                            "retryable": code == "offline", "correlation_id": "sc_" + uuid.uuid4().hex[:16]}
+        except (TimeoutError, socket.timeout):
+            raise RequestTimeout(req.operation_id, budget) from None
+        except urllib.error.URLError as e:
+            if isinstance(e.reason, (TimeoutError, socket.timeout)):
+                raise RequestTimeout(req.operation_id, budget) from None
+            raise
 
     def health(self) -> tuple[int, dict | list]:
         return self.send(self.build_health())

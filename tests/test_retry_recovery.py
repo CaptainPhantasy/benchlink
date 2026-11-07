@@ -4,12 +4,30 @@ import threading
 import urllib.error
 import urllib.request
 from dataclasses import replace
+from pathlib import Path
 
 import pytest
 from benchlink_sidecar import server
 from benchlink_sidecar.client import BridgeClient
 from benchlink_sidecar.config import load_config
 from benchlink_sidecar.ux import BridgeControlShell, Phase, WaitStatus
+
+
+def task_result(task_id, session_id, status="succeeded", error_class=None):
+    """A full wire result, so tests exercise the production terminal guard."""
+    return {
+        "v": "1", "type": "task.result", "task_id": task_id,
+        "session_id": session_id, "status": status,
+        "summary": "Recovered after an explicit Send", "artifact_links": [],
+        "agent_id": "ethan", "created_at": "2026-11-05T16:00:00-05:00",
+        "error_class": error_class,
+    }
+
+
+def launch_browser(playwright):
+    if not Path(playwright.chromium.executable_path).is_file():
+        pytest.skip("Playwright Chromium is not installed")
+    return playwright.chromium.launch(headless=True, args=["--no-sandbox"])
 
 
 def post(base, path, body=None):
@@ -27,15 +45,16 @@ def terminal_sidecar(monkeypatch):
         calls.append(req.operation_id)
         if req.operation_id=='health': return 200,{'type':'health.pong'}
         if req.operation_id=='sessionCreate': return 200,{'type':'session.created','session_id':'sess_new'}
-        if req.operation_id=='taskCreate': return 200,{'type':'task.result','task_id':req.body['task_id'],'status':'accepted'}
-        if req.operation_id=='taskGet': return 200,{'type':'task.result','task_id':shell.task_id,'session_id':shell.session_id,'status':'succeeded','summary':'Recovered after an explicit Send','artifact_links':[]}
+        if req.operation_id=='taskCreate': return 200,task_result(req.body['task_id'],req.body['session_id'],'accepted')
+        if req.operation_id=='taskGet': return 200,task_result(shell.task_id,shell.session_id)
         return 200,{}
     monkeypatch.setattr(BridgeClient,'send',send)
     shell=BridgeControlShell(cfg)
     shell.phase=Phase.ERROR; shell.wait_status=WaitStatus.ERROR
     shell.goal='Keep this exact task text'; shell.target_key='ethan'; shell.high_priority=True
     shell.session_id='sess_terminal'; shell.task_id='task_terminal'
-    shell.result={'status':'failed','task_id':shell.task_id,'session_id':shell.session_id,'error_class':'internal'}
+    shell.task_accepted=True
+    shell.result=task_result(shell.task_id,shell.session_id,'failed','internal')
     shell.error={'code':'internal','message':'fixture terminal error'}
     monkeypatch.setattr(server,'BridgeControlShell',lambda *a,**k:shell)
     sc=server.serve(replace(cfg,listen_port=0))
@@ -77,12 +96,13 @@ def test_retry_button_actual_dom_recovers_once_then_explicit_send(terminal_sidec
     shell.result["error_class"] = terminal_code
     shell.error["code"] = terminal_code
     with sync.sync_playwright() as p:
-        browser=p.chromium.launch(headless=True,args=['--no-sandbox'])
+        browser=launch_browser(p)
         page=browser.new_page(viewport={'width':1280,'height':800}); page.set_default_timeout(5000); errors=[];page.on('pageerror',lambda e:errors.append(str(e)))
         requests=[]
         page.on('request',lambda r:requests.append(r.url))
         page.route('**/*',lambda r:r.continue_() if r.request.url.startswith(base+'/') else r.abort())
         page.goto(base)
+        page.wait_for_function('loaded')
         page.locator('#goal').fill(shell.goal)
         page.evaluate('(snap)=>{target=snap.target;lastSent={target:snap.target,goal:snap.goal,high_priority:snap.high_priority};show(snap)}',shell.snapshot())
         page.wait_for_function('document.getElementById("errPrimary").textContent==="Retry"')
@@ -131,6 +151,8 @@ def test_retry_refuses_while_dispatch_lock_held(terminal_sidecar,monkeypatch):
         return {'snapshot':shell.snapshot()}
     monkeypatch.setattr(shell,'start_and_wait',blocked)
     shell.phase=Phase.PICK
+    shell.task_accepted=False
+    shell.session_id=shell.task_id=shell.result=None
     try:
         with ThreadPoolExecutor(max_workers=1) as pool:
             first=pool.submit(post,base,'/_sidecar/ux/run',{'goal':'pending'})
@@ -147,9 +169,9 @@ def test_stale_error_retry_409_keeps_send_locked(terminal_sidecar):
     stale=shell.snapshot()
     shell.phase=Phase.WAIT;shell.wait_status=WaitStatus.RUNNING
     with sync.sync_playwright() as p:
-        browser=p.chromium.launch(headless=True,args=['--no-sandbox'])
+        browser=launch_browser(p)
         page=browser.new_page();page.set_default_timeout(5000)
-        page.goto(base);page.locator('#goal').fill(shell.goal)
+        page.goto(base);page.wait_for_function('loaded');page.locator('#goal').fill(shell.goal)
         page.evaluate('(snap)=>show(snap)',stale)
         page.locator('#errPrimary').click()
         page.wait_for_function('!recovering && document.getElementById("errTitle").textContent==="Task in progress"')
@@ -161,29 +183,31 @@ def test_stale_error_retry_409_keeps_send_locked(terminal_sidecar):
 
 
 @pytest.mark.parametrize("result_status", [None, "accepted", "running"])
-def test_offline_retry_never_resets_uncertain_nonterminal_task(terminal_sidecar, result_status):
-    """Only a known failed result may take the terminal-offline reset path."""
+@pytest.mark.parametrize("error_code", ["offline", "internal", "timeout"])
+def test_retry_never_resets_uncertain_nonterminal_task(terminal_sidecar, result_status, error_code):
+    """Every interrupted accepted task exposes polling recovery on its card."""
     sync = pytest.importorskip("playwright.sync_api")
     shell, base, calls = terminal_sidecar
-    shell.error["code"] = "offline"
+    shell.error["code"] = error_code
     shell.task_accepted = True
     shell.result = {"status": result_status} if result_status else None
     with sync.sync_playwright() as p:
-        browser = p.chromium.launch(headless=True, args=["--no-sandbox"])
+        browser = launch_browser(p)
         page = browser.new_page()
         page.set_default_timeout(5000)
         page.route("**/*", lambda r: r.continue_() if r.request.url.startswith(base + "/") else r.abort())
         page.goto(base)
+        page.wait_for_function('loaded')
         page.evaluate("snap => show(snap)", shell.snapshot())
-        # Await the complete action. Beta 03 resumes this accepted task; lower
-        # branches only health-check. Neither is allowed to reset or replace it.
-        page.evaluate("actions.Retry()")
-        resumes = hasattr(shell, "can_resume_interrupted_wait")
-        assert page.evaluate("lastSnapshot.phase") == ("done" if resumes else "error")
+        # Retry must poll the accepted task, never reset or replace it.
+        assert page.locator("#errPrimary").inner_text() == "Retry"
+        page.locator("#errPrimary").click()
+        page.wait_for_function("!busy && lastSnapshot.phase === 'done'")
+        assert page.evaluate("lastSnapshot.phase") == "done"
         assert page.evaluate("lastSnapshot.task_id") == "task_terminal"
-        assert shell.phase == (Phase.DONE if resumes else Phase.ERROR)
+        assert shell.phase == Phase.DONE
         assert shell.session_id == "sess_terminal"
         assert calls.count("sessionClose") == calls.count("taskCreate") == 0
-        assert calls.count("taskGet") == (1 if resumes else 0)
-        assert calls.count("health") >= 1
+        assert calls.count("taskGet") == 1
+        assert calls.count("health") == 0
         browser.close()
