@@ -228,7 +228,11 @@ async function resend(toFloyd=false) {
   if (recovering || busy || pending() || !loaded) return;
   // Own the entire End-and-Send sequence before the first asynchronous request.
   recovering=true; updateSendEnabled();
-  const saved = lastSent || {goal:$('goal').value, target, high_priority:$('hp').checked};
+  // A reload or another window can restore a task that this page never sent.
+  // Capture its authoritative draft before End clears the server snapshot.
+  const saved = lastSnapshot.task_id
+    ? {goal:lastSnapshot.goal, target:lastSnapshot.target, high_priority:lastSnapshot.high_priority}
+    : lastSent || {goal:$('goal').value, target, high_priority:$('hp').checked};
   try {
     if (!await action('end')) return;
     target=toFloyd ? 'floyd' : saved.target; $('targetLabel').textContent=displayName(target);
