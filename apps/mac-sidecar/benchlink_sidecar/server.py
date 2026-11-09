@@ -143,8 +143,7 @@ function displayName(key) { return (roster.find(x => x.key === key) || {}).displ
 function selectTarget(key, focus=false) {
   if (!loaded || busy || recovering || pending()) return;
   target=key; $('targetLabel').textContent=displayName(target);
-  $('composeHeading').textContent='Compose task for '+displayName(target).split('·')[0].trim();
-  renderRoster();
+  renderRoster(); updateSendEnabled();
   if (focus) rost.querySelector('[aria-checked="true"]').focus();
 }
 function renderRoster() {
@@ -224,7 +223,7 @@ async function action(kind, body={}, recoverySequence=false) {
   if (kind==='run' && (pending() || (recovering && !recoverySequence) || previewMode || pairingBusy || pairingState!=='paired' || connectionKey!=='connected')) return false;
   if (kind==='retry' && pending()) kind='poll';
   if (kind==='run') requestUncertain=true;
-  clearTimeout(timer);
+  clearTimeout(timer); timer=null;
   busy=true; updateSendEnabled();
   try {
     const {r,j}=await post('/_sidecar/ux/'+kind,body);

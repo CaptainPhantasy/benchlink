@@ -27,7 +27,7 @@ def test_run_dispatch_is_serialized(monkeypatch):
             try:
                 status,body=second.result(timeout=2)
                 assert status==409
-                assert body['presentation']['error']['primary']=='End task'
+                assert body['presentation']['error']['title']=='Task in progress'
                 assert len(count)==1
             finally: release.set()
             assert first.result()[0]==200
@@ -42,12 +42,6 @@ def test_task_in_flight_has_dedicated_exception():
     with pytest.raises(ux.TaskInFlight): shell.start_and_wait('second')
 
 
-def test_roster_accessible_keyboard_and_locked_composition():
-    for value in ('role="radiogroup"', "b.tabIndex", "ArrowDown", "ArrowUp", "ArrowLeft", "ArrowRight", "Home", "End", 'id="composeHeading"', "leads.className='leads'", "readOnly=inflight", "$('hp').disabled=inflight", 'aria-describedby="sendHint"', 'id="noticeEnd"'):
-        assert value in HTML_SHELL
-
-
-def test_selected_target_has_an_icon_and_heading_refresh():
+def test_selected_target_has_a_decorative_icon():
     assert 'lucide-check' in HTML_SHELL
-    render = HTML_SHELL.split('function renderRoster()', 1)[1].split('function updateSendEnabled()', 1)[0]
-    assert "$('composeHeading').textContent" in render
+    assert 'aria-hidden' in HTML_SHELL

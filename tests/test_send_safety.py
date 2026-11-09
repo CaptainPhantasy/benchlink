@@ -11,7 +11,7 @@ from dataclasses import replace
 from benchlink_testkit import Harness
 
 from benchlink_sidecar.server import serve
-from benchlink_sidecar.ui.copy import TASK_IN_FLIGHT_BODY, TASK_IN_FLIGHT_TITLE
+from benchlink_sidecar.ui.copy import TASK_IN_FLIGHT_TITLE
 from benchlink_sidecar.ux import ROSTER
 
 
@@ -84,9 +84,11 @@ def test_inflight_send_returns_409_and_leaves_task_untouched():
                                {"target": "ethan", "goal": "should not start"})
             assert st2 == 409, body2
             assert body2["type"] == "error" and body2["code"] == "validation"
-            assert TASK_IN_FLIGHT_BODY in body2["message"]
+            assert "Completion is not confirmed" in body2["message"]
             assert "O1" not in body2["message"]
             assert body2["presentation"]["error"]["title"] == TASK_IN_FLIGHT_TITLE
+            # End is not cancellation: unfinished work remains owned.
+            assert _post(base, "/_sidecar/ux/end")[0] == 409
             # Running task untouched
             st3, poll = _post(base, "/_sidecar/ux/poll")
             assert st3 == 200
@@ -105,7 +107,7 @@ def test_html_has_radiogroup_and_no_o1_user_copy():
             with urllib.request.urlopen(base + "/", timeout=3) as r:
                 html = r.read().decode()
             assert 'role="radiogroup"' in html
-            assert "Wait for confirmed completion to change target" in html or "rosterLocked" in html
+            assert 'id="rosterLock"' in html
             assert "O1" not in html  # no internal codes in UI
             assert "Bridge Control HTML send" not in html
         finally:
