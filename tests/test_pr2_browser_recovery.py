@@ -9,6 +9,38 @@ from test_pr1_recovery import local_sidecar
 from test_retry_recovery import launch_browser, terminal_sidecar
 
 
+@pytest.mark.parametrize("code,label,target", [
+    ("timeout", "Send again", "ethan"),
+    ("routing", "Send to Floyd", "floyd"),
+])
+def test_reload_resend_preserves_original_goal_and_priority(terminal_sidecar, code, label, target):
+    sync = pytest.importorskip("playwright.sync_api")
+    shell, base, calls = terminal_sidecar
+    shell.error["code"] = shell.result["error_class"] = code
+    with sync.sync_playwright() as p:
+        browser = launch_browser(p)
+        page = browser.new_page()
+        page.set_default_timeout(5000)
+        page.route("**/*", lambda r: r.continue_() if r.request.url.startswith(base + "/") else r.abort())
+        page.goto(base)
+        page.wait_for_function("loaded && !busy")
+        page.reload()
+        page.wait_for_function("loaded && !busy")
+        assert page.evaluate("lastSent") is None
+        assert page.locator("#errPrimary").inner_text() == label
+        with page.expect_request("**/_sidecar/ux/run") as request:
+            page.locator("#errPrimary").click()
+        body = request.value.post_data_json
+        assert body["goal"] == "Keep this exact task text"
+        assert body["high_priority"] is True
+        assert body["target"] == target
+        page.wait_for_function("lastSnapshot.phase==='done' && !recovering && !busy")
+        assert shell.goal == body["goal"] and shell.high_priority
+        assert shell.target_key == target
+        assert calls.count("sessionClose") == calls.count("taskCreate") == 1
+        browser.close()
+
+
 @pytest.mark.parametrize("action,target", [("Send again", "ethan"), ("Send to Floyd", "floyd")])
 def test_resend_locks_before_end_and_double_click_dispatches_once(terminal_sidecar, action, target):
     sync = pytest.importorskip("playwright.sync_api")
