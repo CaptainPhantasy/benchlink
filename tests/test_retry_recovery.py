@@ -176,13 +176,18 @@ def test_stale_error_retry_409_keeps_send_locked(terminal_sidecar):
 
 @pytest.mark.parametrize("result_status", [None, "accepted", "running"])
 @pytest.mark.parametrize("error_code", ["offline", "internal", "timeout"])
-def test_retry_never_resets_uncertain_nonterminal_task(terminal_sidecar, result_status, error_code):
+def test_retry_never_resets_uncertain_nonterminal_task(terminal_sidecar, result_status, error_code, monkeypatch):
     """Every interrupted accepted task exposes polling recovery on its card."""
     sync = pytest.importorskip("playwright.sync_api")
     shell, base, calls = terminal_sidecar
     shell.error["code"] = error_code
     shell.task_accepted = True
     shell.result = {"status": result_status} if result_status else None
+    # Keep the connection refresh from recovering before the explicit Retry click.
+    # Polling the accepted task is still available through its original client.
+    def disconnected(self):
+        raise OSError("Local connection-status fixture")
+    monkeypatch.setattr(BridgeClient, "health", disconnected)
     with sync.sync_playwright() as p:
         browser = launch_browser(p)
         page = browser.new_page()

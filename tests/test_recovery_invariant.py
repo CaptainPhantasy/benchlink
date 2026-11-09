@@ -162,7 +162,7 @@ def test_every_frozen_get_error_class_preserves_unknown_original(code, monkeypat
         shell = BridgeControlShell(h.sidecar_cfg, client=h.client, poll_sleep=0)
         shell.start_and_wait("original task", max_ticks=1)
         identity = shell.task_id,shell.session_id
-        real_open = client_module.urllib.request.urlopen
+        real_open = client_module.open_no_redirects
         def error(request, *args, **kwargs):
             if request.get_method()=="GET" and "/tasks/" in request.full_url:
                 body={"v":"1","type":"error","code":code,"message":"Local rejection fixture",
@@ -170,7 +170,7 @@ def test_every_frozen_get_error_class_preserves_unknown_original(code, monkeypat
                 raise urllib.error.HTTPError(request.full_url, 401 if code.startswith("auth.") else 400,
                                              "Fixture", {}, io.BytesIO(json.dumps(body).encode()))
             return real_open(request,*args,**kwargs)
-        monkeypatch.setattr(client_module.urllib.request,"urlopen",error)
+        monkeypatch.setattr(client_module,"open_no_redirects",error)
         advance(shell)
         assert_owned(shell,h,identity,True)
 
@@ -185,7 +185,7 @@ def test_repeated_recovery_deadlines_never_release_pending_original(wrapped, mon
         def deadline(*args,**kwargs):
             error=TimeoutError("Local recovery deadline")
             raise urllib.error.URLError(error) if wrapped else error
-        monkeypatch.setattr(client_module.urllib.request,"urlopen",deadline)
+        monkeypatch.setattr(client_module,"open_no_redirects",deadline)
         for _ in range(3):
             advance(shell)
             assert shell.error["code"]=="timeout"

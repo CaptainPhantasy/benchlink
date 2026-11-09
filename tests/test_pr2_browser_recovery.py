@@ -23,9 +23,9 @@ def test_reload_resend_preserves_original_goal_and_priority(terminal_sidecar, co
         page.set_default_timeout(5000)
         page.route("**/*", lambda r: r.continue_() if r.request.url.startswith(base + "/") else r.abort())
         page.goto(base)
-        page.wait_for_function("loaded && !busy")
+        page.wait_for_function("loaded && !busy && connectionKey==='connected' && pairingState==='paired'")
         page.reload()
-        page.wait_for_function("loaded && !busy")
+        page.wait_for_function("loaded && !busy && connectionKey==='connected' && pairingState==='paired'")
         assert page.evaluate("lastSent") is None
         assert page.locator("#errPrimary").inner_text() == label
         with page.expect_request("**/_sidecar/ux/run") as request:
@@ -53,7 +53,7 @@ def test_resend_locks_before_end_and_double_click_dispatches_once(terminal_sidec
         requests = []
         page.on("request", lambda r: requests.append(r.url))
         page.goto(base)
-        page.wait_for_function("loaded")
+        page.wait_for_function("loaded && connectionKey==='connected' && pairingState==='paired'")
         page.evaluate("""snap => {
             show(snap);
             lastSent={goal:snap.goal,target:snap.target,high_priority:snap.high_priority};
@@ -69,7 +69,7 @@ def test_resend_locks_before_end_and_double_click_dispatches_once(terminal_sidec
         assert page.evaluate("recovering")
         assert page.locator("#send").is_disabled()
         page.evaluate("document.getElementById('send').click()")
-        assert calls == []
+        assert all(call == "health" for call in calls)
         page.evaluate("window.releaseEnd()")
         page.wait_for_function("lastSnapshot.phase==='done' && !recovering && !busy")
         assert calls.count("sessionClose") == 1
@@ -104,7 +104,8 @@ def test_run_409_keeps_send_locked_after_other_window_finishes_dispatch(monkeypa
             requests = []
             page.on("request", lambda r: requests.append(r.url))
             page.goto(base)
-            page.wait_for_function("loaded")
+            page.locator("#pairBtn").click()
+            page.wait_for_function("loaded && connectionKey==='connected' && pairingState==='paired'")
             page.locator("#goal").fill("second window must not replace the task")
             with ThreadPoolExecutor(1) as pool:
                 first = pool.submit(call, "/_sidecar/ux/run", {"goal": "original window", "max_ticks": 1})
@@ -136,6 +137,7 @@ def test_initial_status_failure_retry_loads_original_task_before_unlocking_send(
     with Harness(adapter_env={"BENCHLINK_FAKE_TRANSPORT_MODE": "silent"}) as h, local_sidecar(h) as (call, _, base):
         original = call("/_sidecar/ux/run", {"goal": "existing task before reload", "max_ticks": 1})[1]["snapshot"]
         status_requests = []
+        allow_load = {"value": False}
         with sync.sync_playwright() as p:
             browser = launch_browser(p)
             page = browser.new_page()
@@ -146,7 +148,7 @@ def test_initial_status_failure_retry_loads_original_task_before_unlocking_send(
                     return request.abort()
                 if request.request.url == base + "/_sidecar/ux":
                     status_requests.append(request.request.url)
-                    if len(status_requests) == 1:
+                    if not allow_load["value"]:
                         return request.abort()
                 return request.continue_()
 
@@ -156,9 +158,10 @@ def test_initial_status_failure_retry_loads_original_task_before_unlocking_send(
             assert not page.evaluate("loaded")
             assert page.locator("#send").is_disabled()
             assert page.locator("#errPrimary").inner_text() == "Retry"
+            allow_load["value"] = True
             page.locator("#errPrimary").click()
             page.wait_for_function("loaded && !busy && lastSnapshot.phase==='wait'")
-            assert len(status_requests) == 2
+            assert len(status_requests) >= 2
             assert page.evaluate("lastSnapshot.task_id") == original["task_id"]
             assert page.locator("#send").is_disabled()
             assert len(h.state.tasks) == len(h.state.sessions) == len(h.adapter.transport.dispatched) == 1

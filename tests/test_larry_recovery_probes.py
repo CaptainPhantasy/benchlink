@@ -5,6 +5,7 @@ from pathlib import Path
 import pytest
 from benchlink_testkit import Harness, valid
 from benchlink_sidecar.ux import BridgeControlShell, TaskInFlight
+from test_retry_recovery import launch_browser
 
 
 def install_lost_ack(h, monkeypatch, recovery):
@@ -85,7 +86,7 @@ def test_browser_recovery_must_not_enable_duplicate_send(scenario, monkeypatch):
     import threading
     import time
     from dataclasses import replace
-    from playwright.sync_api import sync_playwright
+    sync = pytest.importorskip("playwright.sync_api")
     from benchlink_sidecar import server
     with Harness(adapter_env={'BENCHLINK_FAKE_TRANSPORT_MODE':'silent'}) as h:
         def recovery(payload):
@@ -98,15 +99,15 @@ def test_browser_recovery_must_not_enable_duplicate_send(scenario, monkeypatch):
         threading.Thread(target=sidecar.serve_forever, kwargs={'poll_interval':.05}, daemon=True).start()
         base = 'http://127.0.0.1:' + str(sidecar.server_address[1])
         try:
-            with sync_playwright() as p:
-                browser = p.chromium.launch(headless=True, args=['--no-sandbox'])
+            with sync.sync_playwright() as p:
+                browser = launch_browser(p)
                 page = browser.new_page(); page.set_default_timeout(7000)
                 page.route('**/*', lambda r: r.continue_() if r.request.url.startswith(base+'/') else r.abort())
                 page.goto(base); page.locator('#pairBtn').click()
                 page.wait_for_function("pairingState==='paired' && !pairingBusy")
                 page.locator('#goal').fill('Browser original must remain in flight')
                 page.locator('#send').click()
-                page.wait_for_function("lastSnapshot.phase==='error' && !sending")
+                page.wait_for_function("lastSnapshot.phase==='error' && !busy")
                 assert page.evaluate('lastSnapshot.submission_uncertain') and page.locator('#send').is_disabled()
                 original_id = page.evaluate('lastSnapshot.task_id')
                 page.evaluate('actions.Retry()')
@@ -117,7 +118,7 @@ def test_browser_recovery_must_not_enable_duplicate_send(scenario, monkeypatch):
                 if enabled:
                     page.locator('#goal').fill('Duplicate browser submission must be blocked')
                     page.locator('#send').click()
-                    page.wait_for_function("!sending && lastSnapshot.phase==='error'")
+                    page.wait_for_function("!busy && lastSnapshot.phase==='error'")
                 counts = len(h.state.tasks), len(h.state.sessions), len(h.adapter.transport.dispatched)
                 print(json.dumps({'browser_case':scenario, 'send_enabled_after_recovery':enabled,
                                   'original_task_status':original_status, 'task_session_dispatch_counts':counts}))

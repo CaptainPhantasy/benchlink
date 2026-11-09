@@ -11,6 +11,7 @@ from benchlink_adapter.results import InMemoryDriveClient
 from benchlink_sidecar import server
 from benchlink_sidecar.client import BridgeClient
 from benchlink_sidecar.ux import BridgeControlShell, Phase, TaskInFlight
+from test_retry_recovery import launch_browser
 from grace_beta_helpers import ArtifactReceiver
 from test_webhook import Receiver, _env
 
@@ -28,7 +29,7 @@ def test_a4_real_fixture_artifact_reaches_bridge_control(source, tmp_path):
         base = "http://127.0.0.1:" + str(sidecar.server_address[1])
         try:
             with sync.sync_playwright() as p:
-                browser = p.chromium.launch(headless=True, args=["--no-sandbox"])
+                browser = launch_browser(p)
                 context = browser.new_context()
                 allowed = [base + "/", rx.url.rsplit("/", 1)[0] + "/"]
                 context.route("**/*", lambda r: r.continue_() if any(r.request.url.startswith(a) for a in allowed) else r.abort())
@@ -76,7 +77,9 @@ def test_b2_non_envelope_502_is_offline_and_retry_only_gets_same_task(raw, monke
         assert snap["phase"] == "error" and snap["error"]["code"] == "offline"
         assert snap["error"]["http"] == 502 and shell.can_resume_interrupted_wait()
         assert snap["presentation"]["error"]["primary"] == "Retry"
-        bad[0] = False; shell.retry_terminal_error()
+        bad[0] = False
+        assert h.wait_final(h.client._live_token, original[0])[1]["status"] == "succeeded"
+        shell.retry_terminal_error()
         assert shell.phase == Phase.DONE and (shell.task_id, shell.session_id) == original
         assert len(h.state.tasks) == len(h.state.sessions) == len(h.adapter.transport.dispatched) == 1
         assert h.state.sessions[shell.session_id]["status"] == "open"
@@ -102,11 +105,13 @@ def test_b4_ten_second_webhook_deadline_reaches_client_as_504_timeout():
         assert snap["phase"] == "error" and snap["error"]["code"] == "timeout", snap["error"]
         assert snap["error"]["http"] == 504 and 9.5 <= elapsed < 15
         task = h.state.tasks[snap["task_id"]]
-        assert task["status"] == "failed" and task["error_class"] == "timeout"
+        assert task["status"] == "accepted" and task["error_class"] is None
         assert shell.can_resume_interrupted_wait() and snap["submission_uncertain"]
         identity = shell.task_id, shell.session_id
-        shell.retry_terminal_error()  # only a full matching terminal GET releases ownership
-        assert not shell.can_resume_interrupted_wait() and not shell.submission_uncertain
+        shell.retry_terminal_error()  # an uncertain dispatch stays owned until a terminal result
+        assert shell.phase == Phase.WAIT and shell.submission_uncertain
+        assert shell.has_unfinished_task()
+        with pytest.raises(TaskInFlight): shell.start_and_wait("must not duplicate")
         assert (shell.task_id, shell.session_id) == identity and len(rx.requests) == 1
         assert len(h.state.tasks) == len(h.state.sessions) == 1
         print(json.dumps({"item": "B4", "evidence": "real loopback deadline, not live", "webhook_s": 10,
@@ -174,7 +179,7 @@ def test_b4_pair_and_request_timeout_classifier_handles_wrapped_socket_timeout(m
         reason = TimeoutError("local fixture deadline")
         error = urllib.error.URLError(reason) if wrapped else reason
         def expired(*args, **kwargs): raise error
-        monkeypatch.setattr(module.urllib.request, "urlopen", expired)
+        monkeypatch.setattr(module, "open_no_redirects", expired)
         with pytest.raises((TimeoutError, urllib.error.URLError)) as caught: h.client.health()
         assert h.client.pairing_failure_code(caught.value) == "timeout"
 
@@ -192,10 +197,10 @@ def test_b4_browser_timeout_retry_preserves_existing_or_uncertain_task(acknowled
         snap = shell.snapshot(); original = shell.task_id, shell.session_id
         sync = pytest.importorskip("playwright.sync_api")
         with sync.sync_playwright() as p:
-            browser = p.chromium.launch(headless=True, args=["--no-sandbox"])
+            browser = launch_browser(p)
             page = browser.new_page(); page.set_default_timeout(7000)
             page.route("**/*", lambda r: r.continue_() if r.request.url.startswith(base + "/") else r.abort())
-            page.goto(base); page.wait_for_function("taskStateLoaded && connectionKey==='disconnected'")
+            page.goto(base); page.wait_for_function("loaded && connectionKey==='disconnected'")
             page.evaluate("snap => show(snap)", snap)
             assert page.locator("#send").is_disabled()
             assert page.locator("#errPrimary").text_content() == "Retry"
@@ -231,6 +236,7 @@ def test_b2_b4_gateway_lost_create_ack_retry_queries_same_task(status, raw, code
         assert not snap["task_accepted"] and shell.can_resume_interrupted_wait()
         assert snap["presentation"]["error"]["primary"] == "Retry"
         with pytest.raises(TaskInFlight): shell.start_and_wait("must not duplicate")
+        assert h.wait_final(h.client._live_token, original[0])[1]["status"] == "succeeded"
         shell.retry_terminal_error()
         assert shell.phase == Phase.DONE and (shell.task_id, shell.session_id) == original
         assert len(h.state.tasks) == len(h.state.sessions) == len(h.adapter.transport.dispatched) == 1

@@ -6,6 +6,7 @@ import pytest
 from benchlink_testkit import Harness, valid
 from benchlink_sidecar import client as module
 from benchlink_sidecar.ux import BridgeControlShell, Phase, TaskInFlight
+from test_retry_recovery import launch_browser
 
 FULL = {"v": "1", "type": "error", "code": "offline", "message": "Local fixture gateway failure",
         "retryable": True, "correlation_id": "req_fixture"}
@@ -66,7 +67,7 @@ def test_valid_complete_frozen_error_retains_its_contract_fields(code, monkeypat
     with Harness() as h:
         def response(*args, **kwargs):
             raise urllib.error.HTTPError(h.base + "/v1/health", 502, "Local fixture", {}, io.BytesIO(json.dumps(body).encode()))
-        monkeypatch.setattr(module.urllib.request, "urlopen", response)
+        monkeypatch.setattr(module, "open_no_redirects", response)
         assert h.client.health() == (502, body)
 
 
@@ -74,7 +75,7 @@ def test_valid_complete_frozen_error_retains_its_contract_fields(code, monkeypat
 def test_http_error_body_read_deadline_is_timeout_with_safe_same_id_retry(wrapped, monkeypatch):
     with Harness() as h:
         h.client.pair()
-        real_open = module.urllib.request.urlopen
+        real_open = module.open_no_redirects
         class SlowErrorBody:
             def read(self, *args):
                 error = TimeoutError("Local fixture HTTPError body deadline")
@@ -86,7 +87,7 @@ def test_http_error_body_read_deadline_is_timeout_with_safe_same_id_retry(wrappe
                 result.close()  # task was actually accepted/dispatched before the gateway failed
                 raise urllib.error.HTTPError(req.full_url, 502, "Local fixture", {}, SlowErrorBody())
             return result
-        monkeypatch.setattr(module.urllib.request, "urlopen", response)
+        monkeypatch.setattr(module, "open_no_redirects", response)
         shell = BridgeControlShell(h.sidecar_cfg, client=h.client, poll_sleep=0)
         snap = shell.start_and_wait("Keep tracking when reading an error body times out")["snapshot"]
         identity = snap["task_id"], snap["session_id"]
@@ -128,7 +129,7 @@ def test_browser_malformed_ack_retry_never_sends_a_second_task(monkeypatch):
         base = "http://127.0.0.1:" + str(sidecar.server_address[1])
         try:
             with sync.sync_playwright() as p:
-                browser = p.chromium.launch(headless=True, args=["--no-sandbox"])
+                browser = launch_browser(p)
                 page = browser.new_page(); page.set_default_timeout(7000)
                 page.route("**/*", lambda r: r.continue_() if r.request.url.startswith(base + "/") else r.abort())
                 page.goto(base); page.locator("#pairBtn").click()
