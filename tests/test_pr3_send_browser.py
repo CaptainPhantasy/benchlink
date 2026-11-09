@@ -27,7 +27,10 @@ def test_radio_keyboard_selection_updates_accessible_state_and_heading():
         browser = launch_browser(p)
         page = browser.new_page()
         page.goto(base)
-        page.wait_for_function("loaded && !busy")
+        page.wait_for_function("loaded && !busy && connectionKey === 'connected'")
+        if page.evaluate("pairingState !== 'paired'"):
+            page.locator("#pairBtn").click()
+            page.wait_for_function("pairingState === 'paired' && !pairingBusy")
         group = page.get_by_role("radiogroup", name="Staff target")
         radios = group.get_by_role("radio")
         assert radios.count() == 8
@@ -70,7 +73,10 @@ def test_rejected_run_recovers_all_controls_only_after_confirming_no_task(reply)
 
         page.route("**/*", route)
         page.goto(base)
-        page.wait_for_function("loaded && !busy")
+        page.wait_for_function("loaded && !busy && connectionKey === 'connected'")
+        if page.evaluate("pairingState !== 'paired'"):
+            page.locator("#pairBtn").click()
+            page.wait_for_function("pairingState === 'paired' && !pairingBusy")
         page.locator("#goal").fill("Keep ownership until recovery confirms rejection")
         page.locator("#send").click()
         page.wait_for_function("localFailure && !busy")
@@ -95,7 +101,10 @@ def test_dispatch_and_wait_keep_all_controls_locked_until_matching_result():
         page = browser.new_page()
         page.set_default_timeout(5000)
         page.goto(base)
-        page.wait_for_function("loaded && !busy")
+        page.wait_for_function("loaded && !busy && connectionKey === 'connected'")
+        if page.evaluate("pairingState !== 'paired'"):
+            page.locator("#pairBtn").click()
+            page.wait_for_function("pairingState === 'paired' && !pairingBusy")
         page.locator("#goal").fill("One accepted task")
         page.evaluate("""() => {
             const originalPost=post;
@@ -134,7 +143,10 @@ def test_prior_poll_timer_cannot_unlock_a_newer_dispatch():
         requests = []
         page.on("request", lambda request: requests.append(request.url))
         page.goto(base)
-        page.wait_for_function("loaded && !busy")
+        page.wait_for_function("loaded && !busy && connectionKey === 'connected'")
+        if page.evaluate("pairingState !== 'paired'"):
+            page.locator("#pairBtn").click()
+            page.wait_for_function("pairingState === 'paired' && !pairingBusy")
         page.locator("#goal").fill("Original task")
         page.locator("#send").click()
         page.wait_for_function("!busy && lastSnapshot.phase==='wait'")
