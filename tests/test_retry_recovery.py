@@ -11,17 +11,7 @@ from benchlink_sidecar import server
 from benchlink_sidecar.client import BridgeClient
 from benchlink_sidecar.config import load_config
 from benchlink_sidecar.ux import BridgeControlShell, Phase, WaitStatus
-
-
-def task_result(task_id, session_id, status="succeeded", error_class=None):
-    """A full wire result, so tests exercise the production terminal guard."""
-    return {
-        "v": "1", "type": "task.result", "task_id": task_id,
-        "session_id": session_id, "status": status,
-        "summary": "Recovered after an explicit Send", "artifact_links": [],
-        "agent_id": "ethan", "created_at": "2026-11-05T16:00:00-05:00",
-        "error_class": error_class,
-    }
+from recovery_fixtures import wire_result
 
 
 def launch_browser(playwright):
@@ -45,8 +35,8 @@ def terminal_sidecar(monkeypatch):
         calls.append(req.operation_id)
         if req.operation_id=='health': return 200,{'type':'health.pong'}
         if req.operation_id=='sessionCreate': return 200,{'type':'session.created','session_id':'sess_new'}
-        if req.operation_id=='taskCreate': return 200,task_result(req.body['task_id'],req.body['session_id'],'accepted')
-        if req.operation_id=='taskGet': return 200,task_result(shell.task_id,shell.session_id)
+        if req.operation_id=='taskCreate': return 200,wire_result(req.body['task_id'],req.body['session_id'],'accepted')
+        if req.operation_id=='taskGet': return 200,wire_result(shell.task_id,shell.session_id,'succeeded',summary='Recovered after an explicit Send')
         return 200,{}
     monkeypatch.setattr(BridgeClient,'send',send)
     shell=BridgeControlShell(cfg)
@@ -54,7 +44,7 @@ def terminal_sidecar(monkeypatch):
     shell.goal='Keep this exact task text'; shell.target_key='ethan'; shell.high_priority=True
     shell.session_id='sess_terminal'; shell.task_id='task_terminal'
     shell.task_accepted=True
-    shell.result=task_result(shell.task_id,shell.session_id,'failed','internal')
+    shell.result=wire_result(shell.task_id,shell.session_id,'failed',error_class='internal')
     shell.error={'code':'internal','message':'fixture terminal error'}
     monkeypatch.setattr(server,'BridgeControlShell',lambda *a,**k:shell)
     sc=server.serve(replace(cfg,listen_port=0))
@@ -187,30 +177,35 @@ def test_stale_error_retry_409_keeps_send_locked(terminal_sidecar):
 
 @pytest.mark.parametrize("result_status", [None, "accepted", "running"])
 @pytest.mark.parametrize("error_code", ["offline", "internal", "timeout"])
-def test_retry_never_resets_uncertain_nonterminal_task(terminal_sidecar, result_status, error_code):
+def test_retry_never_resets_uncertain_nonterminal_task(terminal_sidecar, result_status, error_code, monkeypatch):
     """Every interrupted accepted task exposes polling recovery on its card."""
     sync = pytest.importorskip("playwright.sync_api")
     shell, base, calls = terminal_sidecar
     shell.error["code"] = error_code
     shell.task_accepted = True
     shell.result = {"status": result_status} if result_status else None
+    # Keep the connection refresh from recovering before the explicit Retry click.
+    # Polling the accepted task is still available through its original client.
+    def disconnected(self):
+        raise OSError("Local connection-status fixture")
+    monkeypatch.setattr(BridgeClient, "health", disconnected)
     with sync.sync_playwright() as p:
         browser = launch_browser(p)
         page = browser.new_page()
         page.set_default_timeout(5000)
         page.route("**/*", lambda r: r.continue_() if r.request.url.startswith(base + "/") else r.abort())
         page.goto(base)
-        page.wait_for_function('loaded')
+        page.wait_for_function("loaded")
         page.evaluate("snap => show(snap)", shell.snapshot())
         # Retry must poll the accepted task, never reset or replace it.
         assert page.locator("#errPrimary").inner_text() == "Retry"
         page.locator("#errPrimary").click()
-        page.wait_for_function("!busy && lastSnapshot.phase === 'done'")
+        page.wait_for_function("!recovering && !busy && lastSnapshot.phase === 'done'")
         assert page.evaluate("lastSnapshot.phase") == "done"
         assert page.evaluate("lastSnapshot.task_id") == "task_terminal"
         assert shell.phase == Phase.DONE
         assert shell.session_id == "sess_terminal"
         assert calls.count("sessionClose") == calls.count("taskCreate") == 0
         assert calls.count("taskGet") == 1
-        assert calls.count("health") == 0
+        assert set(calls) <= {"taskGet", "health"}
         browser.close()

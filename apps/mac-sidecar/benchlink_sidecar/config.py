@@ -172,3 +172,10 @@ def describe(cfg: SidecarConfig) -> dict:
         ENV_DEVICE_ID: cfg.device_id,
         "source": cfg.source,
     }
+
+
+def ui_config(cfg: SidecarConfig) -> dict:
+    """Allowlisted browser diagnostics. Keep describe() CLI-only."""
+    from urllib.parse import urlsplit
+    return {"bridge_host": urlsplit(cfg.base_url or "").hostname,
+            "transport": "Tailscale HTTPS", "device_id": cfg.device_id}

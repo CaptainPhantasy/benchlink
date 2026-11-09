@@ -24,11 +24,13 @@ import uuid
 import urllib.error
 import urllib.request
 from dataclasses import dataclass, field
+from datetime import datetime, timezone
 from urllib.parse import quote
 
 from .config import ConfigError, SidecarConfig
 from .http_transport import open_no_redirects
 from .task_result import is_task_result
+from .ui.copy import error_card
 
 DRY_RUN_BASE = "{BENCHLINK_BRIDGE_BASE_URL}/v1"
 REDACTED = "<redacted>"
@@ -65,11 +67,13 @@ class RequestTimeout(TimeoutError):
         self.operation_id = operation_id
         super().__init__(f"Bridge {operation_id} reply exceeded {seconds:g}s")
 
+
 class UnacknowledgedDispatch(OSError):
     """An untyped gateway failure cannot prove task.create was rejected."""
     def __init__(self, http_status: int, code: str):
         self.http_status, self.code = http_status, code
         super().__init__(f"Task acknowledgement unavailable (HTTP {http_status}); task may exist")
+
 
 def _is_frozen_error(body) -> bool:
     """Validate the complete 0.2.0-mvp error envelope before trusting rejection.
@@ -97,19 +101,79 @@ class BridgeClient:
         self.dispatch_timeout = dispatch_timeout
         self._live_token: str | None = cfg.access_token
         self.pair_count = 0
+        self.expires_at: str | None = None  # RFC3339 Z from last successful pair
+        self.pairing_state: str = "paired" if cfg.access_token else "not_paired"
+        self.pairing_error_code: str | None = None
 
     # ---- D3 pairing ---------------------------------------------------------
     def can_pair(self) -> bool:
         from pathlib import Path
         return Path(self.cfg.device_key_path).expanduser().is_file()
 
+    def pairing_failure_code(self, exc: Exception) -> str:
+        from .pairing import PairingError
+        if isinstance(exc, PairingError):
+            return exc.code if exc.code in {
+                "auth.expired", "auth.unpaired", "auth.denied", "offline", "timeout",
+                "routing", "validation", "session.not_found", "task.not_found", "internal"
+            } else "internal"
+        if isinstance(exc, (TimeoutError, socket.timeout)) or (
+                isinstance(exc, urllib.error.URLError) and isinstance(exc.reason, (TimeoutError, socket.timeout))):
+            return "timeout"
+        if isinstance(exc, OSError):
+            return "offline"
+        if isinstance(exc, ConfigError) and not self.cfg.upstream_configured:
+            return "offline"
+        return "internal"
+
     def pair(self) -> dict:
-        """Pair with the device key; keeps the bearer in memory only."""
+        """Replace the bearer only after success; never return it to a UI caller."""
         from .pairing import pair
-        tok = pair(self.cfg, timeout=self.timeout)
+        previous_state = self.pairing_snapshot()["state"]
+        try:
+            tok = pair(self.cfg, timeout=self.timeout)
+        except Exception as exc:
+            code = self.pairing_failure_code(exc)
+            self.pairing_error_code = code
+            # A failed manual Re-pair must not destroy a still-working session.
+            if previous_state == "paired" and self._live_token:
+                self.pairing_state = "paired"
+            else:
+                self.pairing_state = {"auth.denied": "not_allowed",
+                                      "auth.expired": "expired"}.get(code, "failed")
+            raise
         self._live_token = tok["access_token"]
+        self.expires_at = tok.get("expires_at")
+        self.pairing_state = "paired"
+        self.pairing_error_code = None
         self.pair_count += 1
         return {"token_type": tok["token_type"], "expires_at": tok["expires_at"]}
+
+    def pairing_snapshot(self) -> dict:
+        """Redacted pairing view for UI /_sidecar/status (never includes the token)."""
+        state = self.pairing_state
+        if state == "paired" and self.expires_at:
+            try:
+                exp = datetime.strptime(self.expires_at, "%Y-%m-%dT%H:%M:%SZ").replace(
+                    tzinfo=timezone.utc)
+                if exp <= datetime.now(timezone.utc):
+                    state = "expired"
+                    self.pairing_state = "expired"
+            except ValueError:
+                pass
+        return {
+            "state": state,
+            "label": {
+                "paired": "Paired",
+                "not_paired": "Not paired",
+                "expired": "Pairing expired",
+                "failed": "Pairing failed",
+                "not_allowed": "This Mac isn't allowed",
+            }.get(state, state),
+            "expires_at": self.expires_at if state in {"paired", "expired"} else None,
+            "device_id": self.cfg.device_id,
+            "error_code": self.pairing_error_code,
+        }
 
     def _apply_token(self, req: PreparedRequest) -> None:
         req.headers["Authorization"] = f"Bearer {self._live_token}"
@@ -251,7 +315,8 @@ class BridgeClient:
                     return err
             self._apply_token(req)
         status, body = self._raw_send(req)
-        # re-pair ONCE on auth.expired / auth.unpaired (no refresh token in MVP)
+        # Re-pair once for other operations. Never replay an ambiguous task POST;
+        # its original ID can be recovered by GET (including bounded D3 repair).
         if (needs_auth and req.operation_id != "taskCreate" and status == 401 and isinstance(body, dict)
                 and body.get("code") in {"auth.expired", "auth.unpaired"} and self.can_pair()):
             err = self._pair_or_error()
@@ -262,14 +327,15 @@ class BridgeClient:
         return status, body
 
     def _pair_or_error(self):
-        from .pairing import PairingError
         try:
             self.pair()
             return None
-        except PairingError as e:
-            return (e.http_status or 401), {"v": "1", "type": "error", "code": e.code,
-                                            "message": "pairing failed: " + e.message,
-                                            "retryable": False, "correlation_id": "sc_pair"}
+        except Exception as exc:
+            code = self.pairing_failure_code(exc)
+            return (getattr(exc, "http_status", None) or (503 if code == "offline" else 401)), {
+                "v": "1", "type": "error", "code": code,
+                "message": error_card(code, device_id=self.cfg.device_id)["body"],
+                "retryable": False, "correlation_id": "sc_" + uuid.uuid4().hex[:16]}
 
     def _raw_send(self, req: PreparedRequest):
         data = json.dumps(req.body).encode() if req.body is not None else None

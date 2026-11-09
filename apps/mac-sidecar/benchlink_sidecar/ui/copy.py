@@ -18,6 +18,22 @@ class StatusToken:
     tone: str  # neutral | info | success | danger
 
 
+
+CONNECTION = {
+    "connected": ("Connected", "success"),
+    "connecting": ("Connecting", "info"),
+    "disconnected": ("Disconnected", "danger"),
+    "not_configured": ("Preview mode (offline)", "warning"),
+}
+
+PAIRING = {
+    "paired": "Paired",
+    "not_paired": "Not paired",
+    "expired": "Pairing expired",
+    "failed": "Pairing failed",
+    "not_allowed": "This Mac isn't allowed",
+}
+
 STATUS: dict[str, StatusToken] = {
     "idle": StatusToken("idle", "Idle", "neutral"),
     "queued": StatusToken("queued", "Queued", "info"),
@@ -73,7 +89,7 @@ _ERROR_TEMPLATES: dict[str, tuple[str, str, str, str | None]] = {
     ),
     "task_in_flight": (
         "Task in progress",
-        "A task is in flight. End task first, then pick a target and send again.",
+        "A task is in flight. Wait for confirmed completion before starting another.",
         "End task",
         None,
     ),
@@ -218,6 +234,8 @@ def copy_tables_for_html() -> dict[str, Any]:
     """JSON-serializable tables injected into the HTML shell."""
     return {
         "status": {k: asdict(v) for k, v in STATUS.items()},
+        "connection": {k: {"label": lab, "tone": tone} for k, (lab, tone) in CONNECTION.items()},
+        "pairing": dict(PAIRING),
         "errors": {
             k: {"title": t, "body": b, "primary": p, "secondary": s}
             for k, (t, b, p, s) in _ERROR_TEMPLATES.items()

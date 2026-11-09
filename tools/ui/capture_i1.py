@@ -81,11 +81,14 @@ def main():
             if path == '/': return r.continue_()
             calls.append((path,r.request.post_data))
             if path=='/_sidecar/status': return r.fulfill(json=state)
+            if path=='/_sidecar/ux': return r.fulfill(json={'phase':'pick','wait_status':'idle','task_in_flight':False})
             if path=='/_sidecar/pair':
                 if mode['pair']=='success':
                     state['pairing']={'state':'paired','label':'Paired','device_id':'mac-i1-fixture'}
                     return r.fulfill(json={'state':'paired','device_id':'mac-i1-fixture'})
-                return r.fulfill(status=403,json={'code':'auth.denied','message':'RAW_PRIVATE_PATH', 'presentation':{'error':error_card('auth.denied',device_id='mac-i1-fixture')}})
+                state['pairing']={'state':'not_allowed','label':"This Mac isn't allowed",'device_id':'mac-i1-fixture','error_code':'auth.denied'}
+                if mode['pair']=='expirefail': state['pairing']={'state':'expired','label':'Pairing expired','device_id':'mac-i1-fixture','error_code':'auth.expired'}
+                return r.fulfill(status=403,json={'code':'auth.expired' if mode['pair']=='expirefail' else 'auth.denied','message':'RAW_PRIVATE_PATH', 'presentation':{'error':error_card('auth.expired' if mode['pair']=='expirefail' else 'auth.denied',device_id='mac-i1-fixture')}})
             if path=='/_sidecar/ux': return r.fulfill(json=live['snapshot'])
             if path=='/_sidecar/ux/run':
                 if mode['run']=='wait':
@@ -184,9 +187,29 @@ def main():
             page.evaluate('refreshStatus()'); assert page.locator('#send').is_disabled(); shot('S1-empty')
             page.locator('#pairBtn').click(); page.wait_for_function('pairingState==="paired" && !pairingBusy')
             assert page.locator('#send').is_enabled(); assert page.locator('#setup').is_hidden(); shot('S1-paired')
-            state['pairing']={'state':'not_allowed','label':"This Mac isn't allowed",'device_id':'mac-i1-fixture','error_code':'auth.denied'}
-            page.evaluate('refreshStatus()'); assert page.locator('#send').is_disabled(); shot('S1-denied')
-            for st,name in [('failed','S1-pairfail'),('expired','S1-expired'),('not_paired','S1-partial')]:
+            state['pairing']['expires_at']=page.evaluate('new Date(Date.now()+90000).toISOString()')
+            page.evaluate('refreshStatus()')
+            assert 'warning-text' in page.locator('#s4PairingLabel').get_attribute('class')
+            page.locator('#connPill').click(); shot('S4-paired'); page.locator('#s4Close').click()
+            # Denial from a real Pair click: no raw message reaches the DOM.
+            state['pairing']={'state':'not_paired','label':'Not paired','device_id':'mac-i1-fixture'}
+            mode['pair']='denied'; page.evaluate('refreshStatus()'); page.locator('#pairBtn').click()
+            page.wait_for_function('pairingState==="not_allowed" && !pairingBusy')
+            assert page.locator('#send').is_disabled()
+            assert 'RAW_PRIVATE_PATH' not in page.locator('body').inner_text(); shot('S1-denied')
+            # Expiry performs one automatic Re-pair only; a failure disables Send.
+            state['pairing']={'state':'expired','label':'Pairing expired','device_id':'mac-i1-fixture'}
+            mode['pair']='expirefail'; before=len([c for c in calls if c[0]=='/_sidecar/pair'])
+            page.evaluate('autoRepairAttempted=false; refreshStatus()')
+            page.evaluate('refreshStatus()')
+            assert len([c for c in calls if c[0]=='/_sidecar/pair'])==before+1
+            assert page.locator('#send').is_disabled()
+            assert page.locator('#sendHint').inner_text()=='Pairing expired. Re-pair to send.'
+            shot('S1-expired')
+            # Successful automatic renewal also enables Send without editing the goal.
+            mode['pair']='success'; page.evaluate('autoRepairAttempted=false; refreshStatus()')
+            assert page.locator('#send').is_enabled()
+            for st,name in [('failed','S1-pairfail'),('not_paired','S1-partial')]:
                 state['pairing']={'state':st,'label':{'failed':'Pairing failed','expired':'Pairing expired','not_paired':'Not paired'}[st],'device_id':'mac-i1-fixture','error_code':'auth.expired' if st=='expired' else 'internal'}
                 page.evaluate('autoRepairAttempted=true; refreshStatus()'); shot(name)
             page.evaluate('pairingBusy=true; repairing=true; renderPairingBusy()'); shot('S1-pairing')
@@ -197,7 +220,7 @@ def main():
             assert page.locator('#connectionHelp').get_attribute('href').endswith('/docs/PAIRING_PROOF_RUNBOOK.md')
             page.unroute('**/*',route)
             # New server with URL explicitly unset; no fake success accepted.
-            preview=serve(replace(load_config({}),listen_port=0))
+            preview=serve(replace(load_config({'BENCHLINK_DEVICE_ID':'mac-i1-fixture'}),listen_port=0))
             threading.Thread(target=preview.serve_forever,kwargs={'poll_interval':0.05},daemon=True).start()
             pb=f'http://127.0.0.1:{preview.server_address[1]}'
             try:

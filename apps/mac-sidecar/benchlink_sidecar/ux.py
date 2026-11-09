@@ -24,7 +24,7 @@ from typing import Callable
 from .task_result import ERROR_CODES, is_task_result
 from .client import AuthNotPaired, BridgeClient, PreparedRequest, RequestTimeout, UnacknowledgedDispatch, _is_frozen_error
 from .ui.copy import error_card, result_card, status_token
-from .config import ConfigError, SidecarConfig, describe
+from .config import ConfigError, SidecarConfig, ui_config
 
 # Soft-lock constants (must stay true for MVP shell)
 O1_NO_MID_TASK_HANDOFF = True
@@ -494,6 +494,9 @@ class BridgeControlShell:
                 http=self.error.get("http"),
                 preview=preview,
             )
+        if self.can_resume_interrupted_wait() and self.error:
+            presentation["error"].update(body="Completion is not confirmed. Retry checks the original task; Send stays locked.",
+                                         primary="Retry", secondary="Open connection")
         return {
             "phase": self.phase.value,
             "target": self.target_key,
@@ -509,10 +512,10 @@ class BridgeControlShell:
             "dry_run_mode": self.dry_run_mode,
             "offline_banner": self.offline_banner,
             "result": self.result,
-            "error": self.error,
+            "error": ({**self.error, "message": presentation["error"]["body"]} if self.error else None),
             "presentation": presentation,
             "soft_locks": self.soft_locks(),
-            "config": describe(self.cfg),
+            "config": ui_config(self.cfg),
             "roster": self.roster(),
         }
 

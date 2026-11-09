@@ -6,6 +6,11 @@ from benchlink_testkit import Harness
 from test_pr1_recovery import local_sidecar, result_for
 from test_pr1_larry_replay import install_lost_ack
 
+def pair_this_mac(page):
+    page.locator('#pairBtn').click()
+    page.wait_for_function("loaded && pairingState==='paired' && !pairingBusy")
+
+
 @pytest.mark.parametrize('scenario',['wrong-ids','malformed-401'])
 def test_browser_retry_never_unlocks_original_until_matching_terminal(scenario,monkeypatch):
     with Harness(adapter_env={'BENCHLINK_FAKE_TRANSPORT_MODE':'silent'}) as h:
@@ -19,7 +24,7 @@ def test_browser_retry_never_unlocks_original_until_matching_terminal(scenario,m
             browser=launch_browser(p)
             page=browser.new_page();page.set_default_timeout(7000)
             page.route('**/*',lambda r:r.continue_() if r.request.url.startswith(base+'/') else r.abort())
-            page.goto(base);page.locator('#goal').fill('one original browser task');page.locator('#send').click()
+            page.goto(base);pair_this_mac(page);page.locator('#goal').fill('one original browser task');page.locator('#send').click()
             page.wait_for_function("lastSnapshot.phase==='error' && !busy")
             assert page.locator('#send').is_disabled()
             original=call('/_sidecar/ux',method='GET')[1]
@@ -45,7 +50,7 @@ def test_browser_reload_and_lost_local_ack_keep_send_guarded():
                 response=r.fetch();assert response.status==200
                 return r.abort() # the local run took effect; its browser reply was lost
             return r.continue_()
-        page.route('**/*',route);page.goto(base)
+        page.route('**/*',route);page.goto(base);pair_this_mac(page)
         page.locator('#goal').fill('lost browser acknowledgement');page.locator('#send').click()
         page.wait_for_function("!busy && localFailure")
         assert page.locator('#send').is_disabled() and page.locator('#errPrimary').is_visible()
@@ -63,7 +68,7 @@ def test_browser_terminal_retry_prepares_draft_without_dispatch():
         browser=launch_browser(p)
         page=browser.new_page();page.set_default_timeout(7000)
         page.route('**/*',lambda r:r.continue_() if r.request.url.startswith(base+'/') else r.abort())
-        page.goto(base);page.locator('#goal').fill('keep this draft');page.locator('#send').click()
+        page.goto(base);pair_this_mac(page);page.locator('#goal').fill('keep this draft');page.locator('#send').click()
         page.wait_for_function("!busy && lastSnapshot.phase==='wait'")
         identity=page.evaluate('lastSnapshot.task_id')
         h.adapter.source.simulate_bot_write(identity,result_for(h,'failed','internal'))

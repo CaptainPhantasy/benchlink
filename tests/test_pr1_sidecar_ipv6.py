@@ -58,7 +58,10 @@ def test_ipv6_listen_host_binds_ipv6_socket_and_serves_bridge_control():
         st, snap = _get(port, "/_sidecar/ux")
         assert st == 200 and json.loads(snap)["phase"] == "pick"
         st, status = _get(port, "/_sidecar/status")
-        assert st == 200 and json.loads(status)["config"]["BENCHLINK_SIDECAR_LISTEN_HOST"] == "::1"
+        assert st == 200
+        # Browser diagnostics expose the sanitized UI model, not raw env keys.
+        assert json.loads(status)["preview_mode"] is True
+        assert json.loads(status)["connection"]["key"] == "not_configured"
 
 
 def test_ipv6_listener_keeps_same_origin_guard():

@@ -21,8 +21,8 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 from . import CONTRACT_VERSION, __version__
 from .client import BridgeClient
-from .config import ConfigError, SidecarConfig, describe
-from .ui.copy import copy_tables_for_html, error_card
+from .config import ConfigError, SidecarConfig, ui_config
+from .ui.copy import CONNECTION, copy_tables_for_html, error_card
 from .ux import DEFAULT_TARGET, ROSTER, BridgeControlShell, TaskInFlight
 from .request_guard import request_denial
 
@@ -57,17 +57,39 @@ HTML_SHELL = """<!DOCTYPE html>
  .result-summary{font-size:15px;margin:0 0 8px} .links a{color:#7fa0ff;display:block;margin:2px 0}
  .meta{color:#8e9198;font-size:12px;margin-top:8px}
  details{margin-top:8px;color:#8e9198;font-family:ui-monospace,monospace;font-size:12px}
- .opt{display:block;background:#1a1d23;color:#e8eaed;border:1px solid #3c4043;border-radius:6px;text-align:left;padding:7px 10px}
- .opt.selected{border-color:#7fa0ff;background:#1a2240}.leads{display:flex;flex-wrap:wrap;gap:4px}
- .leads .opt{display:inline-block;font-size:12px}button:disabled{opacity:.5;cursor:not-allowed}
-</style></head><body>
-<h1>Benchlink · Bridge Control <span class="muted">[Beta]</span></h1>
+.opt{display:block;background:#1a1d23;color:#e8eaed;border:1px solid #3c4043;border-radius:6px;text-align:left;padding:7px 10px}.opt.selected{border-color:#7fa0ff;background:#1a2240}.leads{display:flex;flex-wrap:wrap;gap:4px}.leads .opt{display:inline-block;font-size:12px}button:disabled{opacity:.5;cursor:not-allowed}.pill.warning{background:#3a2a00;color:#f9ab00}.warning-text{color:#f9ab00}.quiet-link{font-size:12px;color:#9aa0a6;margin-left:6px}.loading-rows{visibility:hidden}.loading-rows.pending{animation:reveal 0s 300ms forwards}@keyframes reveal{to{visibility:visible}}</style></head><body>
+<div style="display:flex;align-items:center;justify-content:space-between;gap:12px">
+  <h1 style="margin:0">Benchlink · Bridge Control <span class="muted">[Beta]</span></h1>
+  <button type="button" id="connPill" class="pill neutral" aria-label="Connection: __INITIAL_CONNECTION__. Open connection details">__INITIAL_CONNECTION__</button>
+</div>
 <p class="muted">Send a task to Floyd's Labs staff.</p>
-<div id="banner" class="banner" style="display:none"></div>
+<div id="banner" class="banner" role="alert" style="display:none"></div>
+<div id="previewBanner" class="banner" style="display:none">Preview mode. The bridge address isn't set on this Mac, so tasks can't be sent.</div>
+<div class="card" id="setup">
+  <strong>Setup</strong>
+  <div id="setupRows" class="loading-rows pending">
+    <div id="bridgeRow">Bridge: <span id="bridgeLabel">Connecting</span></div>
+    <div id="pairingRow">Pairing: <span id="pairingLabel" aria-live="polite" aria-atomic="true">Not paired</span></div>
+    <div id="deviceRow">Device: <code id="deviceId"></code> <button type="button" id="copyDevice" aria-label="Copy device ID">Copy device ID</button></div>
+  </div>
+  <button type="button" id="pairBtn" hidden>Pair this Mac</button>
+  <p id="pairHint" class="muted">Device-bound sign-in. Tokens are never shown.</p>
+</div>
+<div class="card" id="s4" style="display:none">
+  <strong id="connectionHeading" tabindex="-1">Connection</strong><p id="s4Reason" class="muted"></p><p id="s4PairingLabel" aria-live="polite"></p>
+  <button type="button" id="s4Retry">Retry</button><button type="button" id="s4Repair" hidden>Re-pair</button>
+  <button type="button" id="copyDiagnostics">Copy diagnostics</button>
+  <a id="connectionHelp" class="quiet-link" href="https://github.com/CaptainPhantasy/benchlink/blob/main/docs/PAIRING_PROOF_RUNBOOK.md" target="_blank" rel="noopener">Connection help</a>
+  <details><summary>Details</summary>
+    <div>Transport: <span id="s4Transport">Tailscale HTTPS</span></div>
+    <div>Host: <code id="s4Host"></code></div>
+    <div id="s4ErrRow" hidden>Last error: <code id="s4Err"></code></div>
+  </details>
+  <button type="button" id="s4Close">Close</button>
+</div>
 <div class="card" id="pick">
   <strong>1 · Pick target</strong>
-  <div id="roster" role="radiogroup" aria-label="Staff target"></div>
-  <p id="rosterLock" class="muted" hidden>Wait for the current task to finish before changing target.</p>
+  <div id="roster" role="radiogroup" aria-label="Staff target"></div><p id="rosterLock" class="muted" hidden>Wait for confirmed completion to change target.</p>
 </div>
 <div class="card" id="compose">
   <strong id="composeHeading">Compose task for Floyd</strong><span id="targetLabel" hidden>Floyd</span>
@@ -76,6 +98,7 @@ HTML_SHELL = """<!DOCTYPE html>
   <textarea id="goal" aria-describedby="goalHelp" placeholder="Describe what you need."></textarea>
   <p id="sendHint" class="muted"></p>
   <button id="send" aria-describedby="sendHint" disabled>Send task</button>
+  <div id="inflightNotice" class="banner" role="alert" style="display:none"><strong>Task in progress</strong><p>A task is in flight. End task first, then pick a target and send again.</p><button id="noticeEnd">End task</button></div>
 </div>
 <div class="card" id="wait">
   <strong id="statusHeading" tabindex="-1">3 · Status</strong>
@@ -108,7 +131,7 @@ const offline = __OFFLINE__;
 const COPY = __COPY__;
 const $ = id => document.getElementById(id);
 const banner = $('banner');
-if (offline) { banner.style.display='block'; banner.textContent = "Preview mode. The bridge address isn't set on this Mac."; }
+
 const rost = $('roster');
 let target = '__DEFAULT__';
 let recovering = false, busy = false, loaded = false, localFailure = false;
@@ -118,7 +141,7 @@ function pending() { return requestUncertain || lastSnapshot.task_in_flight===tr
 const HELP_URL = 'https://github.com/CaptainPhantasy/benchlink/blob/main/docs/PAIRING_PROOF_RUNBOOK.md';
 function displayName(key) { return (roster.find(x => x.key === key) || {}).display || key; }
 function selectTarget(key, focus=false) {
-  if (!loaded || recovering || busy || pending()) return;
+  if (!loaded || busy || recovering || pending()) return;
   target=key; $('targetLabel').textContent=displayName(target);
   renderRoster(); updateSendEnabled();
   if (focus) rost.querySelector('[aria-checked="true"]').focus();
@@ -131,7 +154,7 @@ function renderRoster() {
   roster.forEach((e,i)=>{
     const b=document.createElement('button'); b.type='button'; b.className='opt'+(e.key===target ? ' selected' : '');
     b.setAttribute('role','radio'); b.setAttribute('aria-checked',e.key===target ? 'true' : 'false');
-    b.tabIndex=e.key===target ? 0 : -1;
+    b.tabIndex=e.key===target ? 0 : -1; b.disabled=!loaded || busy || recovering || pending();
     const check=document.createElement('span'); check.setAttribute('aria-hidden','true'); check.innerHTML=e.key===target ? '<svg class="lucide lucide-check" xmlns="http://www.w3.org/2000/svg" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true"><path d="m20 6-11 11-5-5"/></svg> ' : ''; b.appendChild(check);
     b.appendChild(document.createTextNode(e.display+(e.default ? ' · Default' : e.group==='canary' ? ' · Canary' : '')));
     b.onclick=()=>selectTarget(e.key,true);
@@ -147,16 +170,29 @@ function renderRoster() {
     if (e.group==='leads') leads.appendChild(b); else rost.appendChild(b);
   });
   rost.appendChild(leadCaption); rost.appendChild(leads);
+  $('rosterLock').hidden=!(pending());
 }
 function updateSendEnabled() {
   const locked = !loaded || recovering || busy || pending();
-  $('send').disabled = locked || !$('goal').value.trim();
-  $('end').disabled = locked;
-  $('goal').readOnly = locked; $('hp').disabled = locked;
-  $('rosterLock').hidden = !pending();
-  $('sendHint').textContent = pending() ? 'Completion is not confirmed. Retry checks the original task; sending stays locked.' : '';
+  let hint='';
+  if (previewMode) hint="Preview mode. The bridge address isn't set on this Mac, so tasks can't be sent.";
+  else if (!loaded) hint='Loading current task status';
+  else if (recovering) hint='Recovering task';
+  else if (busy) hint='Checking task';
+  else if (pending()) hint='Wait for confirmed completion before starting another task.';
+  else if (connectionKey!=='connected') hint='Reconnect to send.';
+  else if (pairingBusy) hint=repairing ? 'Re-pairing…' : 'Pairing…';
+  else if (pairingState==='not_allowed') hint="This Mac isn't allowed. Ask Larry or Claire to enroll it.";
+  else if (autoRepairFailed || pairingState==='expired') hint='Pairing expired. Re-pair to send.';
+  else if (pairingState==='not_paired') hint='Pair this Mac to send tasks.';
+  else if (pairingState==='failed') hint='Pairing failed. Re-pair to send.';
+  $('send').disabled=!!hint || !$('goal').value.trim(); $('sendHint').textContent=hint;
+  $('end').disabled=locked;
+  $('goal').readOnly=locked; $('hp').disabled=locked;
+  $('rosterLock').hidden=!pending();
   document.querySelectorAll('#roster button').forEach(b=>b.disabled=locked);
 }
+function isInterruptedTask() { return pending() && (localFailure || lastSnapshot.phase!=='wait'); }
 function fallbackError(j) {
   const t = COPY.errors[j.code] || COPY.errors.internal;
   const name = displayName(target).split('·')[0].trim();
@@ -184,7 +220,7 @@ function schedule() {
 }
 async function action(kind, body={}, recoverySequence=false) {
   if (!loaded || busy) return false;
-  if (kind==='run' && (pending() || (recovering && !recoverySequence))) return false;
+  if (kind==='run' && (pending() || (recovering && !recoverySequence) || previewMode || pairingBusy || pairingState!=='paired' || connectionKey!=='connected')) return false;
   if (kind==='retry' && pending()) kind='poll';
   if (kind==='run') requestUncertain=true;
   clearTimeout(timer); timer=null;
@@ -252,7 +288,7 @@ const actions = {
   'Connection help': () => window.open(HELP_URL, '_blank', 'noopener')
 };
 let deviceId = '';
-fetch('/_sidecar/status').then(r=>r.json()).then(st=>{ deviceId=(st.pairing || {}).device_id || (st.config || {}).BENCHLINK_DEVICE_ID || ''; }).catch(()=>{});
+
 function wireAction(button, label) {
   button.style.display = label && actions[label] ? 'inline-block' : 'none';
   button.textContent = label || '';
@@ -275,7 +311,8 @@ function show(snap) {
     $('goal').value=snap.goal || ''; $('hp').checked=!!snap.high_priority;
   }
   if (snap.target) { target=snap.target; $('targetLabel').textContent=displayName(target); }
-  renderRoster(); renderSnapshot(snap); updateSendEnabled();
+  $('inflightNotice').style.display='none';
+  renderSnapshot(snap); renderRoster(); updateSendEnabled();
 }
 function renderSnapshot(snap) {
   const pres=snap.presentation || {}, st=pres.status || COPY.status[snap.wait_status] || COPY.status.idle;
@@ -304,7 +341,7 @@ function renderSnapshot(snap) {
     let err=pres.error || fallbackError(snap.error || {});
     if (pending()) {
       err={...err, body:'Completion is not confirmed. Retry checks the original task; sending stays locked.',
-        primary:'Retry', secondary:'Details'};
+        primary:'Retry', secondary:'Open connection'};
     }
     $('errTitle').textContent=err.title; $('errBody').textContent=err.body;
     for (const [id,value] of [['errCode',err.details_code],['errHttp',err.http],['errCorr',err.correlation_id]]) {
@@ -321,12 +358,134 @@ async function sendTask() {
   try { await action('run',{...lastSent,max_ticks:1}); }
   finally { $('send').textContent='Send task'; updateSendEnabled(); }
 }
+$('noticeEnd').textContent='Retry'; $('noticeEnd').onclick=retryTask;
 $('send').onclick=sendTask;
 $('end').onclick=()=>endTask().catch(()=>showError({code:'offline'}));
 $('goal').addEventListener('input',updateSendEnabled);
 $('copySession').onclick=()=>copyText($('copySession'),$('resultSession').textContent);
 $('copyTask').onclick=()=>copyText($('copyTask'),$('resultTask').textContent);
 $('copyCorr').onclick=()=>copyText($('copyCorr'),$('errCorr').textContent);
+const previewMode = __PREVIEW__;
+let pairingState='not_paired', connectionKey=previewMode ? 'not_configured' : 'connecting';
+let pairingBusy=false, repairing=false, autoRepairAttempted=false, autoRepairFailed=false, lastStatus={}, bannerKey='';
+if (previewMode) $('previewBanner').style.display='block';
+function showBanner(err) {
+  const key=err.title+'|'+err.body;
+  if (key===bannerKey && banner.style.display!=='none') return;
+  bannerKey=key; banner.replaceChildren();
+  const title=document.createElement('strong'); title.textContent=err.title;
+  const body=document.createElement('p'); body.textContent=err.body;
+  banner.appendChild(title); banner.appendChild(body);
+  if (connectionKey==='disconnected') {
+    const retry=document.createElement('button'); retry.textContent='Retry'; retry.onclick=retryConnectionTask; banner.appendChild(retry);
+  }
+  banner.style.display='block'; title.tabIndex=-1; title.focus();
+}
+function openConnection() { $('s4').style.display='block'; $('connectionHeading').focus(); }
+function renderPairingBusy() {
+  if (!pairingBusy) return;
+  $('setup').hidden=false; $('pairBtn').hidden=false; $('pairBtn').disabled=true;
+  const label=repairing ? 'Re-pairing…' : 'Pairing…';
+  $('pairBtn').textContent=label; $('pairingLabel').textContent=label; $('s4PairingLabel').textContent=label;
+}
+async function refreshStatus(allowAutoRepair=true) {
+  try {
+    const r=await fetch('/_sidecar/status'); if (!r.ok) throw new Error('status');
+    const st=await r.json(); lastStatus=st;
+    const conn=st.connection || {}, pair=st.pairing || {};
+    connectionKey=previewMode ? 'not_configured' : (conn.key || 'disconnected');
+    pairingState=pair.state || 'not_paired';
+    const connLabel=previewMode ? 'Preview mode (offline)' : (conn.label || 'Disconnected');
+    $('bridgeLabel').textContent=connLabel; $('deviceId').textContent=pair.device_id || '';
+    $('setupRows').className='';
+    let label=pair.label || 'Not paired';
+    const exp=pair.expires_at && new Date(pair.expires_at);
+    if (pairingState==='paired' && exp && !Number.isNaN(exp.getTime())) {
+      label='Paired · expires '+exp.toLocaleTimeString([], {hour:'numeric',minute:'2-digit',timeZone:'America/Indiana/Indianapolis'})+' ET';
+      $('pairingLabel').className=(exp.getTime()-Date.now()<120000) ? 'warning-text' : '';
+    } else $('pairingLabel').className='';
+    $('pairingLabel').textContent=label; $('s4PairingLabel').textContent=label;
+    $('s4PairingLabel').className=$('pairingLabel').className;
+    $('pairBtn').hidden=previewMode || pairingState==='paired' || pairingState==='not_allowed';
+    $('pairBtn').disabled=false;
+    $('pairBtn').textContent=pairingState==='not_paired' ? 'Pair this Mac' : 'Re-pair';
+    $('pairHint').textContent=previewMode ? 'Set the bridge address first.' : 'Device-bound sign-in. Tokens are never shown.';
+    $('setup').hidden=connectionKey==='connected' && pairingState==='paired';
+    const pill=$('connPill'); pill.textContent=connLabel;
+    pill.className='pill '+(previewMode ? 'warning' : (conn.tone || 'neutral'));
+    pill.setAttribute('aria-label','Connection: '+connLabel+'. Open connection details');
+    let code=pair.error_code;
+    if (pairingState==='not_allowed') code='auth.denied';
+    else if (pairingState==='expired' && autoRepairFailed) code='auth.expired';
+    const card=code ? fallbackError({code}) : null;
+    $('s4Reason').textContent=previewMode ? COPY.errors['offline.preview'].body : connectionKey==='disconnected' ? COPY.errors.offline.body : card ? card.body : pairingState==='paired' ? 'This Mac is connected and paired.' : COPY.errors['auth.unpaired'].body;
+    $('s4Host').textContent=(st.config || {}).bridge_host || 'Not configured';
+    $('s4Transport').textContent='Tailscale HTTPS';
+    $('s4Err').textContent=code || ''; $('s4ErrRow').hidden=!code;
+    $('s4Repair').hidden=previewMode || pairingState==='paired' || pairingState==='not_allowed';
+    if (connectionKey==='disconnected') showBanner({title:"Can't reach the bridge",body:'Check Tailscale is connected, then retry.'});
+    else if (card) showBanner(card);
+    else banner.style.display='none';
+    renderPairingBusy(); updateSendEnabled();
+    if (!loaded && !busy) await bootstrap();
+    if (connectionKey==='connected' && isInterruptedTask() && !recovering && !busy) await retryPoll();
+    if (allowAutoRepair && pairingState==='expired' && !autoRepairAttempted && !pairingBusy && connectionKey==='connected') {
+      await pairDevice(true,true);
+    }
+  } catch (e) {
+    connectionKey=previewMode ? 'not_configured' : 'disconnected';
+    if (!previewMode) {
+      $('connPill').textContent='Disconnected';
+      $('connPill').setAttribute('aria-label','Connection: Disconnected. Open connection details');
+      showBanner(fallbackError({code:'offline'}));
+    }
+    updateSendEnabled();
+  }
+}
+async function pairDevice(repair=false, automatic=false) {
+  if (previewMode || pairingBusy) return false;
+  pairingBusy=true; repairing=repair;
+  if (automatic || pairingState==='expired') autoRepairAttempted=true;
+  renderPairingBusy(); updateSendEnabled();
+  let ok=false, failure=null;
+  try {
+    const {r,j}=await post('/_sidecar/pair'); ok=r.ok;
+    if (!ok) failure=(j.presentation || {}).error || fallbackError(j);
+    else { autoRepairFailed=false; autoRepairAttempted=false; }
+  } catch (e) { failure=fallbackError({code:'offline'}); }
+  finally {
+    if (!ok && automatic) autoRepairFailed=true;
+    pairingBusy=false; repairing=false;
+    // Refresh settled labels and enable Send without another keystroke.
+    await refreshStatus(false); updateSendEnabled();
+  }
+  if (failure) {
+    if (automatic && pairingState!=='not_allowed') failure=fallbackError({code:'auth.expired'});
+    showBanner(failure); showError({code:failure.details_code,presentation:{error:failure}});
+  }
+  if (ok) $('statusHeading').focus();
+  return ok;
+}
+actions['Pair this Mac']=()=>pairDevice(false);
+actions['Re-pair']=()=>pairDevice(true);
+actions['Open connection']=openConnection;
+actions['Retry']=()=>!loaded ? retryTask() : pending() ? retryTask() : (((lastSnapshot.presentation || {}).error || {}).details_code==='offline' ? retryConnectionTask() : retryTask());
+$('connPill').onclick=openConnection;
+$('s4Close').onclick=()=>{ $('s4').style.display='none'; $('connPill').focus(); };
+$('s4Retry').onclick=retryConnectionTask; $('s4Repair').onclick=()=>pairDevice(true);
+$('pairBtn').onclick=()=>pairDevice(pairingState!=='not_paired');
+$('copyDevice').onclick=()=>copyText($('copyDevice'),$('deviceId').textContent);
+$('copyDiagnostics').onclick=()=>copyText($('copyDiagnostics'),JSON.stringify(lastStatus));
+async function retryConnectionTask() {
+  if (recovering || busy) return;
+  recovering=true; updateSendEnabled();
+  try {
+    await refreshStatus();
+    if (!loaded) await bootstrap();
+    else if (connectionKey==='connected' && (isInterruptedTask() || localFailure)) await action('poll');
+    else if (connectionKey==='connected' && lastSnapshot.phase==='error') await action('retry');
+  } finally { recovering=false; updateSendEnabled(); schedule(); }
+}
 async function bootstrap() {
   if (busy) return;
   busy=true; updateSendEnabled();
@@ -338,9 +497,37 @@ async function bootstrap() {
   finally { busy=false; }
   updateSendEnabled(); schedule();
 }
-$('targetLabel').textContent=displayName(target); renderRoster(); updateSendEnabled(); bootstrap();
+$('targetLabel').textContent=displayName(target); renderRoster(); updateSendEnabled(); bootstrap(); refreshStatus(); setInterval(refreshStatus,30000);
 </script></body></html>
 """
+
+
+def _is_loopback(handler: BaseHTTPRequestHandler) -> bool:
+    host = handler.client_address[0] if handler.client_address else ""
+    return host in {"127.0.0.1", "::1", "localhost"}
+
+
+def connection_view(cfg: SidecarConfig, client: BridgeClient) -> dict:
+    """Header / S1 connection pill. Preview when upstream unset/placeholder."""
+    if not cfg.upstream_configured:
+        key = "not_configured"
+    else:
+        try:
+            st, body = client.health()
+            if st == 200 and isinstance(body, dict) and body.get("type") == "health.pong":
+                key = "connected"
+            else:
+                key = "disconnected"
+        except (ConfigError, OSError):
+            # ConfigError on placeholder without allow → still preview
+            try:
+                _ = cfg.api_base
+                key = "disconnected"
+            except ConfigError:
+                key = "not_configured"
+    label, tone = CONNECTION[key]
+    return {"key": key, "label": label, "tone": tone}
+
 
 
 def make_handler(cfg: SidecarConfig):
@@ -391,9 +578,12 @@ def make_handler(cfg: SidecarConfig):
             path = self.path.split("?", 1)[0]
             if path in {"/", "/index.html"}:
                 shell = BridgeControlShell(cfg)
+                preview = bool(shell.dry_run_mode or not cfg.upstream_configured)
                 html = (HTML_SHELL
                         .replace("__ROSTER__", json.dumps(shell.roster()))
-                        .replace("__OFFLINE__", json.dumps(shell.offline_banner))
+                        .replace("__OFFLINE__", json.dumps(bool(shell.offline_banner)))
+                        .replace("__PREVIEW__", "true" if preview else "false")
+                        .replace("__INITIAL_CONNECTION__", "Preview mode (offline)" if preview else "Connecting")
                         .replace("__COPY__", json.dumps(copy_tables_for_html()))
                         .replace("__DEFAULT__", DEFAULT_TARGET))
                 return self._html(200, html)
@@ -406,10 +596,15 @@ def make_handler(cfg: SidecarConfig):
                 except OSError as e:
                     return self._json(502, error_envelope("offline", f"upstream unreachable: {e}", True))
             if path == "/_sidecar/status":
+                conn = connection_view(cfg, client)
+                pairing = client.pairing_snapshot()
                 return self._json(200, {"sidecar_version": __version__,
                                         "contract": CONTRACT_VERSION,
                                         "upstream_configured": cfg.upstream_configured,
-                                        "config": describe(cfg),
+                                        "preview_mode": conn["key"] == "not_configured",
+                                        "connection": conn,
+                                        "pairing": pairing,
+                                        "config": ui_config(cfg),
                                         "roster_keys": [e.key for e in ROSTER]})
             if path == "/_sidecar/ux":
                 with run_lock:
@@ -420,6 +615,10 @@ def make_handler(cfg: SidecarConfig):
         def _task_response(self, path):
             shell = live["shell"]
             if path == "/_sidecar/ux/run":
+                if shell.dry_run_mode or not cfg.upstream_configured:
+                    env = error_envelope("offline", "Preview mode. Tasks cannot be sent until the bridge is configured.", False)
+                    env["presentation"] = {"error": error_card("offline", preview=True)}
+                    return 503, env
                 if shell.has_unfinished_task():
                     return 409, task_in_flight_error()
                 body = self._read_json()
@@ -427,10 +626,10 @@ def make_handler(cfg: SidecarConfig):
                 if not goal:
                     return 422, error_envelope("validation", "Compose a non-empty task", False)
                 target_key = str(body.get("target") or DEFAULT_TARGET)
-                if target_key not in {entry.key for entry in ROSTER}:
-                    payload = error_envelope("routing", "Choose a staff target", False)
-                    payload["presentation"] = {"error": error_card("routing", target_name=target_key)}
-                    return 422, payload
+                if target_key not in {e.key for e in ROSTER}:
+                    env = error_envelope("routing", "Unknown Staff target", False)
+                    env["presentation"] = {"error": error_card("routing", target_name=target_key)}
+                    return 422, env
                 if shell.phase.value in {"done", "error"}:
                     shell.end_task()
                 out = shell.start_and_wait(goal=goal,
@@ -453,6 +652,26 @@ def make_handler(cfg: SidecarConfig):
             if not self._allow_request(mutation=True):
                 return
             path = self.path.split("?", 1)[0]
+            if path == "/_sidecar/pair":
+                if not _is_loopback(self):
+                    env = error_envelope("auth.denied", "Pair is loopback-only", False)
+                    env["presentation"] = {"error": error_card("auth.denied", device_id=cfg.device_id)}
+                    return self._json(403, env)
+                try:
+                    info = client.pair()
+                    return self._json(200, {"state": "paired", "expires_at": info.get("expires_at"),
+                                             "device_id": cfg.device_id})
+                except Exception as exc:
+                    code = client.pairing_failure_code(exc)
+                    card = error_card(code, device_id=cfg.device_id)
+                    env = error_envelope(code, card["body"], False)
+                    env.update(state=client.pairing_state, device_id=cfg.device_id)
+                    card["correlation_id"] = env["correlation_id"]
+                    env["presentation"] = {"error": card}
+                    status = getattr(exc, "http_status", None) or {
+                        "auth.denied": 403, "auth.expired": 401,
+                        "offline": 503, "internal": 500}.get(code, 400)
+                    return self._json(status, env)
             if path not in {"/_sidecar/ux/run", "/_sidecar/ux/poll", "/_sidecar/ux/retry", "/_sidecar/ux/end"}:
                 return self._json(404, error_envelope("validation", f"no route {path}", False))
             if not run_lock.acquire(blocking=False):
