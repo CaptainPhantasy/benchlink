@@ -196,7 +196,10 @@ def result_card(result: dict | None, *, target_name: str | None = None) -> dict[
             links.append({"url": item, "label": _truncate_middle(item, 48)})
         elif isinstance(item, dict) and item.get("url"):
             url = str(item["url"])
-            links.append({"url": url, "label": str(item.get("label") or _truncate_middle(url, 48))})
+            links.append({
+                "url": url,
+                "label": str(item.get("title") or item.get("label") or _truncate_middle(url, 48)),
+            })
     task_id = result.get("task_id") or ""
     name = _first_name(target_name)
     finished = ""

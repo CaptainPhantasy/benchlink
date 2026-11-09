@@ -32,9 +32,9 @@ def main(argv: list[str] | None = None) -> int:
         import os
         logging.basicConfig(level=os.environ.get("BENCHLINK_LOG_LEVEL", "INFO"),
                             format="%(asctime)s %(levelname)s %(name)s %(message)s")
-        from .server import serve
+        from .server import listen_url, serve
         srv = serve(cfg)
-        print(f"benchlink bridge-daemon listening on http://{cfg.listen_host}:{cfg.listen_port}/v1 "
+        print(f"benchlink bridge-daemon listening on {listen_url(cfg.listen_host, cfg.listen_port)}/v1 "
               f"(public_base={cfg.public_base_url or 'UNSET'})")
         try:
             srv.serve_forever()
@@ -42,7 +42,8 @@ def main(argv: list[str] | None = None) -> int:
             pass
         return 0
     if cmd == "health":
-        url = f"http://{cfg.listen_host}:{cfg.listen_port}/v1/health"
+        from .server import listen_url
+        url = listen_url(cfg.listen_host, cfg.listen_port) + "/v1/health"
         try:
             with urllib.request.urlopen(url, timeout=3) as r:
                 print(r.status, r.read().decode())

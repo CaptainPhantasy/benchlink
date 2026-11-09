@@ -4,6 +4,7 @@ import threading
 import urllib.error
 import urllib.request
 from dataclasses import replace
+from pathlib import Path
 
 import pytest
 from benchlink_sidecar import server
@@ -11,6 +12,12 @@ from benchlink_sidecar.client import BridgeClient
 from benchlink_sidecar.config import load_config
 from benchlink_sidecar.ux import BridgeControlShell, Phase, WaitStatus
 from recovery_fixtures import wire_result
+
+
+def launch_browser(playwright):
+    if not Path(playwright.chromium.executable_path).is_file():
+        pytest.skip("Playwright Chromium is not installed")
+    return playwright.chromium.launch(headless=True, args=["--no-sandbox"])
 
 
 def post(base, path, body=None):
@@ -36,6 +43,7 @@ def terminal_sidecar(monkeypatch):
     shell.phase=Phase.ERROR; shell.wait_status=WaitStatus.ERROR
     shell.goal='Keep this exact task text'; shell.target_key='ethan'; shell.high_priority=True
     shell.session_id='sess_terminal'; shell.task_id='task_terminal'
+    shell.task_accepted=True
     shell.result=wire_result(shell.task_id,shell.session_id,'failed',error_class='internal')
     shell.error={'code':'internal','message':'fixture terminal error'}
     monkeypatch.setattr(server,'BridgeControlShell',lambda *a,**k:shell)
@@ -78,12 +86,13 @@ def test_retry_button_actual_dom_recovers_once_then_explicit_send(terminal_sidec
     shell.result["error_class"] = terminal_code
     shell.error["code"] = terminal_code
     with sync.sync_playwright() as p:
-        browser=p.chromium.launch(headless=True,args=['--no-sandbox'])
+        browser=launch_browser(p)
         page=browser.new_page(viewport={'width':1280,'height':800}); page.set_default_timeout(5000); errors=[];page.on('pageerror',lambda e:errors.append(str(e)))
         requests=[]
         page.on('request',lambda r:requests.append(r.url))
         page.route('**/*',lambda r:r.continue_() if r.request.url.startswith(base+'/') else r.abort())
         page.goto(base)
+        page.wait_for_function('loaded')
         page.locator('#goal').fill(shell.goal)
         page.evaluate('(snap)=>{target=snap.target;lastSent={target:snap.target,goal:snap.goal,high_priority:snap.high_priority};show(snap)}',shell.snapshot())
         page.wait_for_function('document.getElementById("errPrimary").textContent==="Retry"')
@@ -132,6 +141,8 @@ def test_retry_refuses_while_dispatch_lock_held(terminal_sidecar,monkeypatch):
         return {'snapshot':shell.snapshot()}
     monkeypatch.setattr(shell,'start_and_wait',blocked)
     shell.phase=Phase.PICK
+    shell.task_accepted=False
+    shell.session_id=shell.task_id=shell.result=None
     try:
         with ThreadPoolExecutor(max_workers=1) as pool:
             first=pool.submit(post,base,'/_sidecar/ux/run',{'goal':'pending'})
@@ -148,9 +159,9 @@ def test_stale_error_retry_409_keeps_send_locked(terminal_sidecar):
     stale=shell.snapshot()
     shell.phase=Phase.WAIT;shell.wait_status=WaitStatus.RUNNING
     with sync.sync_playwright() as p:
-        browser=p.chromium.launch(headless=True,args=['--no-sandbox'])
+        browser=launch_browser(p)
         page=browser.new_page();page.set_default_timeout(5000)
-        page.goto(base);page.wait_for_function('taskStateLoaded')
+        page.goto(base);page.wait_for_function('loaded')
         # Deliberately restore the captured stale client view after loading live state.
         page.evaluate('(snap)=>show(snap)',stale)
         page.locator('#goal').fill(shell.goal)
@@ -164,30 +175,31 @@ def test_stale_error_retry_409_keeps_send_locked(terminal_sidecar):
 
 
 @pytest.mark.parametrize("result_status", [None, "accepted", "running"])
-def test_offline_retry_never_resets_uncertain_nonterminal_task(terminal_sidecar, result_status):
-    """Only a known failed result may take the terminal-offline reset path."""
+@pytest.mark.parametrize("error_code", ["offline", "internal", "timeout"])
+def test_retry_never_resets_uncertain_nonterminal_task(terminal_sidecar, result_status, error_code):
+    """Every interrupted accepted task exposes polling recovery on its card."""
     sync = pytest.importorskip("playwright.sync_api")
     shell, base, calls = terminal_sidecar
-    shell.error["code"] = "offline"
+    shell.error["code"] = error_code
     shell.task_accepted = True
     shell.result = {"status": result_status} if result_status else None
     with sync.sync_playwright() as p:
-        browser = p.chromium.launch(headless=True, args=["--no-sandbox"])
+        browser = launch_browser(p)
         page = browser.new_page()
         page.set_default_timeout(5000)
         page.route("**/*", lambda r: r.continue_() if r.request.url.startswith(base + "/") else r.abort())
         page.goto(base)
-        page.wait_for_function("taskStateLoaded")
+        page.wait_for_function("loaded")
         page.evaluate("snap => show(snap)", shell.snapshot())
-        # Await the complete action. Beta 03 resumes this accepted task; lower
-        # branches only health-check. Neither is allowed to reset or replace it.
-        page.evaluate("actions.Retry()")
-        resumes = hasattr(shell, "can_resume_interrupted_wait")
-        assert page.evaluate("lastSnapshot.phase") == ("done" if resumes else "error")
+        # Retry must poll the accepted task, never reset or replace it.
+        assert page.locator("#errPrimary").inner_text() == "Retry"
+        page.locator("#errPrimary").click()
+        page.wait_for_function("!recovering && !busy && lastSnapshot.phase === 'done'")
+        assert page.evaluate("lastSnapshot.phase") == "done"
         assert page.evaluate("lastSnapshot.task_id") == "task_terminal"
-        assert shell.phase == (Phase.DONE if resumes else Phase.ERROR)
+        assert shell.phase == Phase.DONE
         assert shell.session_id == "sess_terminal"
         assert calls.count("sessionClose") == calls.count("taskCreate") == 0
-        assert calls.count("taskGet") == (1 if resumes else 0)
-        assert calls.count("health") >= 1
+        assert calls.count("taskGet") == 1
+        assert set(calls) <= {"taskGet", "health"}
         browser.close()

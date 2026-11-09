@@ -3,7 +3,7 @@ import threading
 from dataclasses import replace
 
 import pytest
-from playwright.sync_api import sync_playwright
+from test_retry_recovery import launch_browser
 from benchlink_testkit import Harness
 from benchlink_sidecar import server
 from test_recovery_invariant import STATUSES, install
@@ -24,25 +24,26 @@ def assert_one(h,identity):
 @pytest.mark.parametrize("case",["partial-error","wrong-task","wrong-session","wrong-both",
                                   "missing-summary","missing-created_at","missing-artifact_links","invalid-error_class"])
 def test_browser_retry_then_send_stays_locked_across_all_recovery_statuses(case,monkeypatch):
+    sync = pytest.importorskip("playwright.sync_api")
     with Harness(adapter_env={"BENCHLINK_FAKE_TRANSPORT_MODE":"silent"}) as h:
         mode=install(h,monkeypatch,True)
         sc,base=start(h)
         try:
-            with sync_playwright() as p:
-                browser=p.chromium.launch(headless=True,args=["--no-sandbox"])
+            with sync.sync_playwright() as p:
+                browser=launch_browser(p)
                 page=browser.new_page();page.set_default_timeout(7000)
                 page.route("**/*",lambda r:r.continue_() if r.request.url.startswith(base+"/") else r.abort())
                 page.goto(base);page.locator("#pairBtn").click()
-                page.wait_for_function("taskStateLoaded && pairingState==='paired' && !pairingBusy")
+                page.wait_for_function("loaded && pairingState==='paired' && !pairingBusy")
                 page.locator("#goal").fill("Original browser-owned task")
                 page.locator("#send").click()
-                page.wait_for_function("lastSnapshot.phase==='error' && !sending")
+                page.wait_for_function("(localFailure || lastSnapshot.phase==='error') && !busy")
                 first=page.evaluate("[lastSnapshot.task_id,lastSnapshot.session_id]")
                 for status in STATUSES:
                     mode["reply"]=(status,case)
                     page.evaluate("actions.Retry()")
                     assert page.locator("#send").is_disabled()
-                    assert page.evaluate("hasPendingTask() && lastSnapshot.task_in_flight")
+                    assert page.evaluate("pending() && lastSnapshot.task_in_flight")
                     assert page.evaluate("[lastSnapshot.task_id,lastSnapshot.session_id]")==first
                     page.evaluate("sendTask();document.getElementById('send').click()")
                     assert_one(h,first)
@@ -53,7 +54,7 @@ def test_browser_retry_then_send_stays_locked_across_all_recovery_statuses(case,
                 page.evaluate("actions.Retry()")
                 assert_one(h,first)
                 # Reload must recover authoritative ownership, not fabricate a fresh Pick.
-                page.reload();page.wait_for_function("taskStateLoaded && pairingState==='paired'")
+                page.reload();page.wait_for_function("loaded && pairingState==='paired'")
                 assert page.locator("#send").is_disabled()
                 assert page.evaluate("[lastSnapshot.task_id,lastSnapshot.session_id]")==first
                 assert_one(h,first)
@@ -63,12 +64,13 @@ def test_browser_retry_then_send_stays_locked_across_all_recovery_statuses(case,
 
 
 def test_lost_local_run_response_cannot_enable_another_browser_send(monkeypatch):
+    sync = pytest.importorskip("playwright.sync_api")
     with Harness(adapter_env={"BENCHLINK_FAKE_TRANSPORT_MODE":"silent"}) as h:
         mode=install(h,monkeypatch,False)
         sc,base=start(h)
         try:
-            with sync_playwright() as p:
-                browser=p.chromium.launch(headless=True,args=["--no-sandbox"])
+            with sync.sync_playwright() as p:
+                browser=launch_browser(p)
                 page=browser.new_page();page.set_default_timeout(7000)
                 page.route("**/*",lambda r:r.continue_() if r.request.url.startswith(base+"/") else r.abort())
                 def lose_response(route):
@@ -76,10 +78,10 @@ def test_lost_local_run_response_cannot_enable_another_browser_send(monkeypatch)
                     route.abort()  # browser never learns the accepted IDs
                 page.route("**/_sidecar/ux/run",lose_response,times=1)
                 page.goto(base);page.locator("#pairBtn").click()
-                page.wait_for_function("taskStateLoaded && pairingState==='paired' && !pairingBusy")
+                page.wait_for_function("loaded && pairingState==='paired' && !pairingBusy")
                 page.locator("#goal").fill("Original local lost-response task")
                 page.locator("#send").click()
-                page.wait_for_function("lastSnapshot.phase==='error' && !sending")
+                page.wait_for_function("(localFailure || lastSnapshot.phase==='error') && !busy")
                 identity=next(iter(h.state.tasks)),next(iter(h.state.sessions))
                 assert page.locator("#send").is_disabled(), "local lost ACK enabled another Send"
                 page.evaluate("sendTask()")

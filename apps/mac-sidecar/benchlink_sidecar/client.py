@@ -20,6 +20,7 @@ from __future__ import annotations
 import json
 import re
 import socket
+import uuid
 import urllib.error
 import urllib.request
 from dataclasses import dataclass, field
@@ -27,9 +28,9 @@ from datetime import datetime, timezone
 from urllib.parse import quote
 
 from .config import ConfigError, SidecarConfig
+from .http_transport import open_no_redirects
 from .task_result import is_task_result
 from .ui.copy import error_card
-import uuid
 
 DRY_RUN_BASE = "{BENCHLINK_BRIDGE_BASE_URL}/v1"
 REDACTED = "<redacted>"
@@ -96,8 +97,7 @@ class BridgeClient:
     def __init__(self, cfg: SidecarConfig, timeout: float = 5.0, dispatch_timeout: float = 15.0):
         self.cfg = cfg
         self.timeout = timeout
-        # task.create waits synchronously for the default 10s webhook deadline.
-        # Keep 5s ordinary reads, but leave 5s margin to receive its 504 reply.
+        # Default webhook dispatch is synchronous up to 10s; leave reply margin.
         self.dispatch_timeout = dispatch_timeout
         self._live_token: str | None = cfg.access_token
         self.pair_count = 0
@@ -342,7 +342,7 @@ class BridgeClient:
         r = urllib.request.Request(req.url, data=data, method=req.method, headers=req.headers)
         budget = max(self.timeout, self.dispatch_timeout) if req.operation_id == "taskCreate" else self.timeout
         try:
-            with urllib.request.urlopen(r, timeout=budget) as resp:
+            with open_no_redirects(r, timeout=budget) as resp:
                 raw = resp.read() or b"{}"
                 try:
                     body = json.loads(raw)

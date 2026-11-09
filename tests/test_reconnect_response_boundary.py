@@ -10,7 +10,7 @@ from test_reconnect_recovery import (
     accepted_sidecar as original_accepted_sidecar,
     accept_and_interrupt,
 )
-from test_retry_recovery import post
+from test_retry_recovery import post, launch_browser
 
 
 @pytest.fixture
@@ -148,7 +148,7 @@ def test_browser_reconnect_survives_completed_response_preemption(
     gate = response_gate
     assert gate["run_finished"].wait(2)
     with sync.sync_playwright() as p:
-        browser = p.chromium.launch(headless=True, args=["--no-sandbox"])
+        browser = launch_browser(p)
         page = browser.new_page()
         page.set_default_timeout(7000)
         page.route("**/*", lambda r: r.continue_() if r.request.url.startswith(base + "/") else r.abort())
@@ -158,14 +158,14 @@ def test_browser_reconnect_survives_completed_response_preemption(
         try:
             page.goto(base)
             page.wait_for_function("connectionKey==='disconnected'")
-            page.wait_for_function("taskStateLoaded")
+            page.wait_for_function("loaded")
             assert page.locator("#goal").get_attribute("readonly") is not None
             assert page.evaluate("lastSnapshot.goal")==initial["goal"]
             page.evaluate("snap => show(snap)", initial)
             gate.update(route="/_sidecar/ux/poll", status=200)
             mode["online"] = True
             page.evaluate("void actions.Retry()")
-            page.wait_for_function("lastSnapshot.phase==='wait' && polling")
+            page.wait_for_function("lastSnapshot.phase==='wait' && !busy")
             assert gate["entered"].is_set()
             mode["finish"] = True
             page.wait_for_function("lastSnapshot.phase==='done' || (lastSnapshot.error || {}).code==='validation'")

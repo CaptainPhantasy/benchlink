@@ -78,6 +78,22 @@ def test_result_card_summary_and_links_no_raw_dump():
     assert empty["empty_links_note"] == "No links returned"
 
 
+def test_result_card_prefers_wire_artifact_titles_and_preserves_fallbacks():
+    url = "https://example.test/artifact.pdf"
+    card = result_card({"artifact_links": [
+        {"url": url, "title": "Quarterly report"},
+        {"url": url, "title": "Wire title", "label": "Legacy label"},
+        {"url": url, "label": "Legacy report"},
+        {"url": url},
+    ]})
+    assert card["artifact_links"] == [
+        {"url": url, "label": "Quarterly report"},
+        {"url": url, "label": "Wire title"},
+        {"url": url, "label": "Legacy report"},
+        {"url": url, "label": url},
+    ]
+
+
 def test_error_card_templates_cover_spec_table():
     # Spec §4.4 required rows (plus task_in_flight / offline.preview variants)
     required = {

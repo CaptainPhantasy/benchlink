@@ -7,7 +7,7 @@ from benchlink_sidecar import server
 from benchlink_sidecar.client import BridgeClient
 from benchlink_sidecar.config import load_config
 from benchlink_sidecar.ux import BridgeControlShell, Phase
-from test_retry_recovery import post, capture_review_state
+from test_retry_recovery import post, capture_review_state, launch_browser
 from recovery_fixtures import wire_result
 
 
@@ -83,7 +83,7 @@ def test_reconnect_retry_actual_dom_resumes_same_id(accepted_sidecar,local_poll_
     shell,base,mode,calls,ids=accepted_sidecar
     if local_poll_failure:mode['break_poll']=False
     with sync.sync_playwright() as p:
-        browser=p.chromium.launch(headless=True,args=['--no-sandbox'])
+        browser=launch_browser(p)
         page=browser.new_page(viewport={'width':1280,'height':800});page.set_default_timeout(7000)
         errors=[];page.on('pageerror',lambda e:errors.append(str(e)))
         page.route('**/*',lambda r:r.continue_() if r.request.url.startswith(base+'/') else r.abort())
@@ -92,14 +92,14 @@ def test_reconnect_retry_actual_dom_resumes_same_id(accepted_sidecar,local_poll_
         page.locator('#goal').fill('Resume the original accepted task')
         page.wait_for_function('!document.getElementById("send").disabled')
         page.locator('#send').click()
-        page.wait_for_function('lastSnapshot.error && lastSnapshot.error.code==="offline" && !sending')
+        page.wait_for_function('(localFailure || (lastSnapshot.error || {}).code==="offline") && !busy')
         original=shell.task_id;session=shell.session_id
         assert page.evaluate('lastSnapshot.task_id')==original
         assert page.locator('#send').is_disabled()
         capture_review_state(page,'W-interrupted-local' if local_poll_failure else 'W-interrupted')
         mode['online']=True;mode['finish']=True
         page.evaluate('document.getElementById("errPrimary").click();document.getElementById("errPrimary").click()')
-        page.wait_for_function('lastSnapshot.phase==="done" && !polling && !recovering')
+        page.wait_for_function('lastSnapshot.phase==="done" && !busy && !recovering')
         assert page.evaluate('lastSnapshot.task_id')==original
         assert page.evaluate('lastSnapshot.session_id')==session
         assert 'Same accepted task' in page.locator('#resultSummary').inner_text()
@@ -114,11 +114,11 @@ def test_health_refresh_alone_resumes_interrupted_task(accepted_sidecar):
     sync=pytest.importorskip('playwright.sync_api')
     shell,base,mode,calls,ids=accepted_sidecar
     with sync.sync_playwright() as p:
-        browser=p.chromium.launch(headless=True,args=['--no-sandbox'])
+        browser=launch_browser(p)
         page=browser.new_page();page.set_default_timeout(5000)
         page.goto(base);page.locator('#goal').fill('Resume without another Send')
         page.wait_for_function('!document.getElementById("send").disabled');page.locator('#send').click()
-        page.wait_for_function('lastSnapshot.error && lastSnapshot.error.code==="offline" && !sending')
+        page.wait_for_function('(localFailure || (lastSnapshot.error || {}).code==="offline") && !busy')
         original=shell.task_id;mode['online']=True;mode['finish']=True
         page.evaluate('refreshStatus()');page.wait_for_function('lastSnapshot.phase==="done"')
         assert shell.task_id==original and calls.count('taskCreate')==1
@@ -130,9 +130,9 @@ def test_overlapping_health_refreshes_issue_only_one_resume_poll(accepted_sideca
     shell,base,mode,calls,ids=accepted_sidecar
     interrupted=accept_and_interrupt(base)
     with sync.sync_playwright() as p:
-        browser=p.chromium.launch(headless=True,args=['--no-sandbox'])
+        browser=launch_browser(p)
         page=browser.new_page();page.set_default_timeout(5000)
-        page.goto(base);page.wait_for_function('taskStateLoaded');page.evaluate('(snap)=>show(snap)',interrupted)
+        page.goto(base);page.wait_for_function('loaded');page.evaluate('(snap)=>show(snap)',interrupted)
         mode['online']=True;mode['finish']=True;mode['poll_delay']=0.3
         before=mode['reads'];poll_requests=[]
         page.on('request',lambda r:poll_requests.append(r.url) if r.url.endswith('/_sidecar/ux/poll') else None)
