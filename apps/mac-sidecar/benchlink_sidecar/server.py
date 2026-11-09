@@ -57,21 +57,25 @@ HTML_SHELL = """<!DOCTYPE html>
  .result-summary{font-size:15px;margin:0 0 8px} .links a{color:#7fa0ff;display:block;margin:2px 0}
  .meta{color:#8e9198;font-size:12px;margin-top:8px}
  details{margin-top:8px;color:#8e9198;font-family:ui-monospace,monospace;font-size:12px}
+ .opt{display:block;background:#1a1d23;color:#e8eaed;border:1px solid #3c4043;border-radius:6px;text-align:left;padding:7px 10px}
+ .opt.selected{border-color:#7fa0ff;background:#1a2240}.leads{display:flex;flex-wrap:wrap;gap:4px}
+ .leads .opt{display:inline-block;font-size:12px}button:disabled{opacity:.5;cursor:not-allowed}
 </style></head><body>
 <h1>Benchlink · Bridge Control <span class="muted">[Beta]</span></h1>
 <p class="muted">Send a task to Floyd's Labs staff.</p>
 <div id="banner" class="banner" style="display:none"></div>
 <div class="card" id="pick">
   <strong>1 · Pick target</strong>
-  <div id="roster"></div>
+  <div id="roster" role="radiogroup" aria-label="Staff target"></div>
+  <p id="rosterLock" class="muted" hidden>Wait for the current task to finish before changing target.</p>
 </div>
 <div class="card" id="compose">
-  <strong>2 · Compose + Send</strong><br/>
-  Target: <span id="targetLabel">Floyd</span>
+  <strong id="composeHeading">Compose task for Floyd</strong><span id="targetLabel" hidden>Floyd</span>
   <label><input type="checkbox" id="hp"/> High priority (also ping Floyd in chat)</label>
   <label for="goal">Staff task</label><p id="goalHelp" class="muted">Describe what you need.</p>
   <textarea id="goal" aria-describedby="goalHelp" placeholder="Describe what you need."></textarea>
-  <button id="send" disabled>Send task</button>
+  <p id="sendHint" class="muted"></p>
+  <button id="send" aria-describedby="sendHint" disabled>Send task</button>
 </div>
 <div class="card" id="wait">
   <strong id="statusHeading" tabindex="-1">3 · Status</strong>
@@ -113,19 +117,44 @@ let lastSnapshot = {}, lastSent = null, viewKey = '';
 function pending() { return requestUncertain || lastSnapshot.task_in_flight===true || ownedSnapshot!==null; }
 const HELP_URL = 'https://github.com/CaptainPhantasy/benchlink/blob/main/docs/PAIRING_PROOF_RUNBOOK.md';
 function displayName(key) { return (roster.find(x => x.key === key) || {}).display || key; }
+function selectTarget(key, focus=false) {
+  if (!loaded || recovering || busy || pending()) return;
+  target=key; $('targetLabel').textContent=displayName(target);
+  renderRoster(); updateSendEnabled();
+  if (focus) rost.querySelector('[aria-checked="true"]').focus();
+}
 function renderRoster() {
-  rost.innerHTML = '';
-  roster.forEach(e => {
-    const b = document.createElement('button'); b.type = 'button';
-    b.textContent = e.display + (e.default ? ' (default)' : '');
-    b.onclick = () => { if (!busy && !recovering && !pending()) { target=e.key; $('targetLabel').textContent=e.display; } };
-    rost.appendChild(b);
+  $('composeHeading').textContent='Compose task for '+displayName(target).split('·')[0].trim();
+  rost.innerHTML='';
+  const leadCaption=document.createElement('p'); leadCaption.className='muted'; leadCaption.textContent='Leads';
+  const leads=document.createElement('div'); leads.className='leads';
+  roster.forEach((e,i)=>{
+    const b=document.createElement('button'); b.type='button'; b.className='opt'+(e.key===target ? ' selected' : '');
+    b.setAttribute('role','radio'); b.setAttribute('aria-checked',e.key===target ? 'true' : 'false');
+    b.tabIndex=e.key===target ? 0 : -1;
+    const check=document.createElement('span'); check.setAttribute('aria-hidden','true'); check.innerHTML=e.key===target ? '<svg class="lucide lucide-check" xmlns="http://www.w3.org/2000/svg" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true"><path d="m20 6-11 11-5-5"/></svg> ' : ''; b.appendChild(check);
+    b.appendChild(document.createTextNode(e.display+(e.default ? ' · Default' : e.group==='canary' ? ' · Canary' : '')));
+    b.onclick=()=>selectTarget(e.key,true);
+    b.onkeydown=event=>{
+      const delta={ArrowDown:1,ArrowRight:1,ArrowUp:-1,ArrowLeft:-1}[event.key];
+      let index;
+      if (delta) index=(i+delta+roster.length)%roster.length;
+      else if (event.key==='Home') index=0;
+      else if (event.key==='End') index=roster.length-1;
+      else return;
+      event.preventDefault(); selectTarget(roster[index].key,true);
+    };
+    if (e.group==='leads') leads.appendChild(b); else rost.appendChild(b);
   });
+  rost.appendChild(leadCaption); rost.appendChild(leads);
 }
 function updateSendEnabled() {
   const locked = !loaded || recovering || busy || pending();
   $('send').disabled = locked || !$('goal').value.trim();
   $('end').disabled = locked;
+  $('goal').readOnly = locked; $('hp').disabled = locked;
+  $('rosterLock').hidden = !pending();
+  $('sendHint').textContent = pending() ? 'Completion is not confirmed. Retry checks the original task; sending stays locked.' : '';
   document.querySelectorAll('#roster button').forEach(b=>b.disabled=locked);
 }
 function fallbackError(j) {
@@ -158,6 +187,7 @@ async function action(kind, body={}, recoverySequence=false) {
   if (kind==='run' && (pending() || (recovering && !recoverySequence))) return false;
   if (kind==='retry' && pending()) kind='poll';
   if (kind==='run') requestUncertain=true;
+  clearTimeout(timer); timer=null;
   busy=true; updateSendEnabled();
   try {
     const {r,j}=await post('/_sidecar/ux/'+kind,body);
@@ -245,7 +275,7 @@ function show(snap) {
     $('goal').value=snap.goal || ''; $('hp').checked=!!snap.high_priority;
   }
   if (snap.target) { target=snap.target; $('targetLabel').textContent=displayName(target); }
-  renderSnapshot(snap); updateSendEnabled();
+  renderRoster(); renderSnapshot(snap); updateSendEnabled();
 }
 function renderSnapshot(snap) {
   const pres=snap.presentation || {}, st=pres.status || COPY.status[snap.wait_status] || COPY.status.idle;
@@ -396,10 +426,15 @@ def make_handler(cfg: SidecarConfig):
                 goal = str(body.get("goal") or "").strip()
                 if not goal:
                     return 422, error_envelope("validation", "Compose a non-empty task", False)
+                target_key = str(body.get("target") or DEFAULT_TARGET)
+                if target_key not in {entry.key for entry in ROSTER}:
+                    payload = error_envelope("routing", "Choose a staff target", False)
+                    payload["presentation"] = {"error": error_card("routing", target_name=target_key)}
+                    return 422, payload
                 if shell.phase.value in {"done", "error"}:
                     shell.end_task()
                 out = shell.start_and_wait(goal=goal,
-                    target_key=str(body.get("target") or DEFAULT_TARGET),
+                    target_key=target_key,
                     high_priority=bool(body.get("high_priority")),
                     max_ticks=int(body.get("max_ticks") or 2))
                 return 200, {"snapshot": out["snapshot"], "send": {"mode": out.get("send", {}).get("mode")}}

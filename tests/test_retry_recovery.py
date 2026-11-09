@@ -171,8 +171,11 @@ def test_stale_error_retry_409_keeps_send_locked(terminal_sidecar):
     with sync.sync_playwright() as p:
         browser=launch_browser(p)
         page=browser.new_page();page.set_default_timeout(5000)
-        page.goto(base);page.wait_for_function('loaded');page.locator('#goal').fill(shell.goal)
-        page.evaluate('(snap)=>show(snap)',stale)
+        page.goto(base);page.wait_for_function('loaded')
+        # This tab still displays an old terminal error while another tab owns
+        # WAIT. Restore that stale view before editing the now-locked composer.
+        page.evaluate('(snap)=>{clearTimeout(timer);show(snap)}',stale)
+        page.locator('#goal').fill(shell.goal)
         page.locator('#errPrimary').click()
         page.wait_for_function('!recovering && document.getElementById("errTitle").textContent==="Task in progress"')
         assert page.locator('#send').is_disabled()
